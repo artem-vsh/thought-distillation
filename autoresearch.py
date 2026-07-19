@@ -482,7 +482,7 @@ def _run_dual_evals(
             prev_heldout_instant, label="prev_heldout_instant"
         ),
         progress_path=heldout_dir / "eval_progress.json",
-        on_progress=_cb if eval_ci.require_heldout_ci else None,
+        on_progress=_cb,  # always publish live status for the dashboard
     )
     heldout_diff = heldout_seq.differential
     progress.record_eval(
@@ -510,7 +510,7 @@ def _run_dual_evals(
             prev_train_instant, label="prev_train_seed_instant"
         ),
         progress_path=train_dir / "eval_progress.json",
-        on_progress=_cb if eval_ci.require_train_seed_ci else None,
+        on_progress=_cb,  # always publish live status for the dashboard
     )
     train_diff = train_seq.differential
     progress.record_eval(

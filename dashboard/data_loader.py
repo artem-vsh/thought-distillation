@@ -366,6 +366,323 @@ def _count_csv_rows(path: Path) -> int | None:
         return None
 
 
+def status_baseline_fallback(run_dir: Path) -> dict[str, Any] | None:
+    """If baseline.json missing, try status.json embedded baseline."""
+    status = _read_json(run_dir / "status.json") or {}
+    b = status.get("baseline")
+    return b if isinstance(b, dict) else None
+
+
+def _metric_acc(blob: Any) -> float | None:
+    if isinstance(blob, dict):
+        if blob.get("accuracy") is not None:
+            return float(blob["accuracy"])
+        inst = blob.get("instant")
+        if isinstance(inst, dict) and inst.get("accuracy") is not None:
+            return float(inst["accuracy"])
+    if isinstance(blob, (int, float)):
+        return float(blob)
+    return None
+
+
+def _metric_half(blob: Any) -> float | None:
+    if not isinstance(blob, dict):
+        return None
+    ci = blob.get("ci")
+    if isinstance(ci, dict) and ci.get("half_width") is not None:
+        return float(ci["half_width"])
+    return None
+
+
+def _build_accuracy_chart(
+    *,
+    history: list[dict[str, Any]],
+    baseline: dict[str, Any] | None,
+    status: dict[str, Any],
+    eval_progress_live: dict[str, Any],
+    ckpt_view: dict[str, Any],
+    headline: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a clean generation timeline for the accuracy chart.
+
+    - generation 0: parent baseline only (never mixed with run metrics)
+    - generation k+1: finalized loop iteration k (from history.jsonl)
+    - live: current incomplete generation (eval progress / intermediate ckpt)
+    """
+    points: list[dict[str, Any]] = []
+
+    if baseline:
+        ti = baseline.get("train_seed_instant")
+        hi = baseline.get("heldout_instant")
+        points.append(
+            {
+                "generation": 0,
+                "kind": "baseline",
+                "label": "gen 0 · baseline",
+                "heldout_instant": hi,
+                "heldout_high": baseline.get("heldout_high"),
+                "train_seed_instant": ti,
+                "train_seed_high": baseline.get("train_seed_high"),
+                "heldout_instant_ci_half": baseline.get("heldout_instant_ci_half"),
+                "heldout_high_ci_half": baseline.get("heldout_high_ci_half"),
+                "train_seed_instant_ci_half": baseline.get("train_seed_instant_ci_half"),
+                "overfit_gap": (
+                    float(ti) - float(hi)
+                    if ti is not None and hi is not None
+                    else None
+                ),
+            }
+        )
+
+    finalized_gens: set[int] = set()
+    for rec in history:
+        raw_it = rec.get("iteration")
+        try:
+            gen = int(raw_it) + 1  # loop iter 0 → gen 1
+        except (TypeError, ValueError):
+            gen = len(points)
+        train_seed = rec.get("train_seed") if isinstance(rec.get("train_seed"), dict) else {}
+        heldout = rec.get("heldout") if isinstance(rec.get("heldout"), dict) else {}
+        post_t = train_seed.get("post") or rec.get("post_train") or rec.get("post")
+        post_h = heldout.get("post") or rec.get("post_heldout")
+        ti = _acc(post_t)
+        hi = _acc(post_h)
+        th = _nested_high_acc(post_t)
+        hh = _nested_high_acc(post_h)
+
+        def _half_from_post(post: Any, key: str = "instant") -> float | None:
+            if not isinstance(post, dict):
+                return None
+            ci = post.get("ci")
+            if not isinstance(ci, dict):
+                return None
+            side = ci.get(key)
+            if isinstance(side, dict) and side.get("half_width") is not None:
+                return float(side["half_width"])
+            return None
+
+        points.append(
+            {
+                "generation": gen,
+                "kind": "finalized",
+                "label": f"gen {gen} · finalized",
+                "loop_iteration": raw_it,
+                "heldout_instant": hi,
+                "heldout_high": hh,
+                "train_seed_instant": ti,
+                "train_seed_high": th,
+                "heldout_instant_ci_half": _half_from_post(post_h, "instant"),
+                "train_seed_instant_ci_half": _half_from_post(post_t, "instant"),
+                "overfit_gap": (
+                    float(ti) - float(hi)
+                    if ti is not None and hi is not None
+                    else None
+                ),
+            }
+        )
+        finalized_gens.add(gen)
+
+    # Live / current generation (eval in progress OR completed pre-eval before history write)
+    live = _live_generation_point(
+        status=status,
+        eval_progress_live=eval_progress_live,
+        ckpt_view=ckpt_view,
+        headline=headline,
+        finalized_gens=finalized_gens,
+        has_baseline=baseline is not None,
+    )
+
+    gens = [p["generation"] for p in points]
+    max_final = max(gens) if gens else (0 if baseline else -1)
+    x_max = max(max_final, live["generation"] if live else max_final, 1)
+
+    return {
+        "points": points,
+        "live": live,
+        "x_min": 0 if baseline else (min(gens) if gens else 0),
+        "x_max": x_max,
+        "x_suggested_max": max(x_max, 2),  # avoid single-tick crumple
+    }
+
+
+def _live_generation_point(
+    *,
+    status: dict[str, Any],
+    eval_progress_live: dict[str, Any],
+    ckpt_view: dict[str, Any],
+    headline: dict[str, Any],
+    finalized_gens: set[int],
+    has_baseline: bool,
+) -> dict[str, Any] | None:
+    """Current generation point not yet in history.jsonl."""
+    prog = eval_progress_live.get("eval_progress") or status.get("eval_progress") or {}
+    eval_active = bool(
+        status.get("eval_in_progress")
+        or eval_progress_live.get("eval_in_progress")
+        or (isinstance(prog, dict) and prog.get("status") in {"in_progress", "complete"})
+    )
+    # Prefer structured progress; fall back to status headline accuracies during a run
+    has_status_metrics = (
+        headline.get("heldout_instant") is not None
+        or headline.get("train_seed_instant") is not None
+    )
+    mid = ckpt_view.get("last_intermediate")
+    live_ckpt = mid if isinstance(mid, dict) else None
+    fin = ckpt_view.get("last_finalized")
+    if (
+        live_ckpt
+        and isinstance(fin, dict)
+        and live_ckpt.get("name") is not None
+        and live_ckpt.get("name") == fin.get("name")
+        and live_ckpt.get("role") != "live_or_latest"
+    ):
+        live_ckpt = None
+
+    if not eval_active and not has_status_metrics and not live_ckpt:
+        return None
+
+    raw_it = headline.get("iteration")
+    try:
+        loop_it = int(raw_it) if raw_it is not None else 0
+    except (TypeError, ValueError):
+        loop_it = 0
+    gen = loop_it + 1  # gen 0 reserved for baseline
+    # If this generation is already finalized in history, only show live if eval in progress
+    if gen in finalized_gens and not (
+        status.get("eval_in_progress") or eval_progress_live.get("eval_in_progress")
+    ):
+        # Still allow intermediate checkpoint marker at next gen?
+        if live_ckpt and live_ckpt.get("role") == "live_or_latest":
+            gen = max(finalized_gens) + 1 if finalized_gens else gen
+        else:
+            return None
+
+    point: dict[str, Any] = {
+        "generation": gen,
+        "kind": "live",
+        "label": f"gen {gen} · live",
+        "loop_iteration": loop_it,
+        "kinds": [],
+    }
+
+    if isinstance(prog, dict) and prog.get("instant"):
+        point["kinds"].append("eval")
+        tag = str(prog.get("tag") or "")
+        inst = prog.get("instant") if isinstance(prog.get("instant"), dict) else {}
+        high = prog.get("high") if isinstance(prog.get("high"), dict) else {}
+        inst_ci = prog.get("instant_ci") if isinstance(prog.get("instant_ci"), dict) else {}
+        high_ci = prog.get("high_ci") if isinstance(prog.get("high_ci"), dict) else {}
+        acc_i = inst.get("accuracy")
+        acc_h = high.get("accuracy")
+        half_i = inst_ci.get("half_width")
+        half_h = high_ci.get("half_width")
+        if "heldout" in tag or "heldout" not in tag and "train" not in tag:
+            point["heldout_instant"] = acc_i
+            point["heldout_high"] = acc_h
+            point["heldout_instant_ci_half"] = half_i
+            point["heldout_high_ci_half"] = half_h
+        if "train" in tag:
+            point["train_seed_instant"] = acc_i
+            point["train_seed_high"] = acc_h
+            point["train_seed_instant_ci_half"] = half_i
+        # If only heldout so far, still show status train-seed if available
+        point["n"] = prog.get("n")
+        point["max_n"] = prog.get("max_n") or prog.get("n_pool")
+        point["tag"] = tag
+        point["status"] = prog.get("status")
+        point["label"] = (
+            f"gen {gen} · {tag} n={prog.get('n')}/{prog.get('max_n') or prog.get('n_pool')}"
+        )
+    # Fill gaps from status headline (e.g. heldout done, train-seed not yet)
+    if point.get("heldout_instant") is None and headline.get("heldout_instant") is not None:
+        point["heldout_instant"] = headline.get("heldout_instant")
+        point["heldout_high"] = headline.get("heldout_high")
+        point.setdefault("kinds", []).append("eval")
+    if point.get("train_seed_instant") is None and headline.get("train_seed_instant") is not None:
+        point["train_seed_instant"] = headline.get("train_seed_instant")
+        point["train_seed_high"] = headline.get("train_seed_high")
+
+    if live_ckpt:
+        point["kinds"].append("checkpoint")
+        point["checkpoint"] = {
+            "name": live_ckpt.get("name"),
+            "batch": live_ckpt.get("batch"),
+            "role": live_ckpt.get("role"),
+        }
+        y_ref = point.get("heldout_instant")
+        if y_ref is None:
+            y_ref = headline.get("heldout_instant")
+        point["checkpoint_y"] = y_ref if y_ref is not None else 0.5
+
+    # Don't emit an empty live point
+    if not point.get("kinds") and point.get("heldout_instant") is None and point.get("train_seed_instant") is None:
+        return None
+    if not point.get("kinds"):
+        point["kinds"] = ["eval"]
+    return point
+
+
+def _baseline_view(baseline_payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalize baseline for the dashboard (aligned heldout/train-seed preferred)."""
+    if not baseline_payload:
+        return None
+    # Full import shape
+    primary = baseline_payload.get("primary")
+    if isinstance(primary, dict) and primary.get("heldout_instant"):
+        hi = primary.get("heldout_instant") or {}
+        hh = primary.get("heldout_high") or {}
+        ti = primary.get("train_seed_instant") or {}
+        th = primary.get("train_seed_high") or {}
+        return {
+            "source": baseline_payload.get("source_root") or baseline_payload.get("path"),
+            "imported_at": baseline_payload.get("imported_at"),
+            "heldout_instant": hi.get("accuracy"),
+            "heldout_high": hh.get("accuracy"),
+            "train_seed_instant": ti.get("accuracy"),
+            "train_seed_high": th.get("accuracy"),
+            "heldout_instant_ci_half": (hi.get("ci") or {}).get("half_width"),
+            "heldout_high_ci_half": (hh.get("ci") or {}).get("half_width"),
+            "train_seed_instant_ci_half": (ti.get("ci") or {}).get("half_width"),
+            "train_seed_high_ci_half": (th.get("ci") or {}).get("half_width"),
+            "heldout_instant_n": hi.get("total"),
+            "heldout_high_n": hh.get("total"),
+            "gap_high_minus_instant": (
+                (primary.get("heldout_instant_vs_high") or {}).get("diff")
+            ),
+            "note": baseline_payload.get("note"),
+            "raw_primary": primary,
+        }
+    # Compact status.json shape
+    if baseline_payload.get("heldout_instant") is not None or isinstance(
+        baseline_payload.get("heldout_instant"), dict
+    ):
+        hi = baseline_payload.get("heldout_instant")
+        hh = baseline_payload.get("heldout_high")
+        ti = baseline_payload.get("train_seed_instant")
+        th = baseline_payload.get("train_seed_high")
+
+        def _acc(x: Any) -> float | None:
+            if isinstance(x, dict):
+                return x.get("accuracy")
+            if isinstance(x, (int, float)):
+                return float(x)
+            return None
+
+        return {
+            "source": baseline_payload.get("path"),
+            "imported_at": baseline_payload.get("imported_at"),
+            "heldout_instant": _acc(hi),
+            "heldout_high": _acc(hh),
+            "train_seed_instant": _acc(ti),
+            "train_seed_high": _acc(th),
+            "gap_high_minus_instant": baseline_payload.get(
+                "heldout_gap_high_minus_instant"
+            ),
+            "note": "Baseline from status.json",
+        }
+    return None
+
+
 def _in_progress_point(
     *,
     status: dict[str, Any],
@@ -504,6 +821,10 @@ def build_snapshot(
     checkpoints_indexed = _read_jsonl(run_dir / "checkpoints.jsonl")
     data_snapshots = _read_jsonl(run_dir / "data_snapshots.jsonl")
     eval_progress_live = _read_json(run_dir / "eval_progress.json") or {}
+    baseline_payload = (
+        _read_json(run_dir / "baseline" / "baseline.json")
+        or status_baseline_fallback(run_dir)
+    )
 
     ckpt_view = _checkpoints_view(run_dir, checkpoints_indexed, history)
     latest_eval = _latest_eval_from_history(history)
@@ -546,56 +867,38 @@ def build_snapshot(
         or config.get("p_value"),
     }
 
-    # Series error bars from post heldout instant_ci when recorded in history
-    series["heldout_instant_ci_half"] = []
-    series["train_seed_instant_ci_half"] = []
-    series["heldout_gap_ci_half"] = []
-    for rec in history:
-        def _half(blob: Any, key: str = "instant") -> float | None:
-            if not isinstance(blob, dict):
-                return None
-            ci = blob.get("ci") if isinstance(blob.get("ci"), dict) else None
-            if not ci:
-                return None
-            side = ci.get(key) if key in ("instant", "high") else None
-            if isinstance(side, dict) and side.get("half_width") is not None:
-                return float(side["half_width"])
-            comps = ci.get("comparisons") or []
-            for c in comps:
-                if c.get("name") == key and c.get("half_width") is not None:
-                    return float(c["half_width"])
-            return None
+    baseline = _baseline_view(baseline_payload)
+    if baseline:
+        headline["baseline_heldout_instant"] = baseline.get("heldout_instant")
+        headline["baseline_heldout_high"] = baseline.get("heldout_high")
+        headline["baseline_gap"] = baseline.get("gap_high_minus_instant")
 
-        post_h = (
-            (rec.get("heldout") or {}).get("post")
-            if isinstance(rec.get("heldout"), dict)
-            else rec.get("post_heldout")
-        )
-        post_t = (
-            (rec.get("train_seed") or {}).get("post")
-            if isinstance(rec.get("train_seed"), dict)
-            else rec.get("post_train") or rec.get("post")
-        )
-        series["heldout_instant_ci_half"].append(_half(post_h, "instant"))
-        series["train_seed_instant_ci_half"].append(_half(post_t, "instant"))
-        # high_minus_instant comparison half-width
-        gap_half = None
-        if isinstance(post_h, dict) and isinstance(post_h.get("ci"), dict):
-            for c in post_h["ci"].get("comparisons") or []:
-                if c.get("name") == "high_minus_instant":
-                    gap_half = c.get("half_width")
-                    break
-        series["heldout_gap_ci_half"].append(gap_half)
-
-    # Provisional in-progress point (same axes as completed series)
-    in_progress = _in_progress_point(
+    # Clean generation timeline for the accuracy chart (linear x-axis).
+    # Gen 0 = baseline only; gen k+1 = completed loop iteration k; live = current.
+    chart = _build_accuracy_chart(
+        history=history,
+        baseline=baseline,
         status=status,
         eval_progress_live=eval_progress_live,
         ckpt_view=ckpt_view,
-        history=history,
         headline=headline,
     )
-    series["in_progress"] = in_progress
+    series["chart"] = chart
+    series["in_progress"] = chart.get("live")
+    # Keep legacy arrays in sync for older UI bits / tests
+    series["iteration"] = [p["generation"] for p in chart["points"]]
+    series["is_baseline"] = [p["kind"] == "baseline" for p in chart["points"]]
+    series["heldout_instant_post"] = [p.get("heldout_instant") for p in chart["points"]]
+    series["heldout_high_post"] = [p.get("heldout_high") for p in chart["points"]]
+    series["train_seed_instant_post"] = [p.get("train_seed_instant") for p in chart["points"]]
+    series["train_seed_high_post"] = [p.get("train_seed_high") for p in chart["points"]]
+    series["heldout_instant_ci_half"] = [
+        p.get("heldout_instant_ci_half") for p in chart["points"]
+    ]
+    series["train_seed_instant_ci_half"] = [
+        p.get("train_seed_instant_ci_half") for p in chart["points"]
+    ]
+    series["overfit_gap"] = [p.get("overfit_gap") for p in chart["points"]]
 
     return {
         "ok": True,
@@ -608,7 +911,8 @@ def build_snapshot(
         "headline": headline,
         "status": status,
         "eval_live": eval_progress_live,
-        "in_progress": in_progress,
+        "in_progress": chart.get("live"),
+        "baseline": baseline,
         "state": {
             "iteration": state.get("iteration"),
             "last_policy_state_path": state.get("last_policy_state_path"),

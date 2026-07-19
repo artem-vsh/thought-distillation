@@ -151,6 +151,63 @@ def test_history_series_high() -> None:
     assert series["overfit_gap"] == [0.1]
 
 
+def test_baseline_is_generation_zero_on_series(tmp_path: Path) -> None:
+    from dashboard.data_loader import build_snapshot
+
+    run = tmp_path / "with-base"
+    run.mkdir()
+    (run / "baseline").mkdir()
+    _write(
+        run / "status.json",
+        json.dumps({"run_dir": str(run), "phase": "init", "iteration": 0}),
+    )
+    history = [
+        {
+            "iteration": 0,
+            "train_seed": {
+                "post": {
+                    "instant": {"accuracy": 0.2},
+                    "high": {"accuracy": 0.6},
+                }
+            },
+            "heldout": {
+                "post": {
+                    "instant": {"accuracy": 0.15},
+                    "high": {"accuracy": 0.55},
+                }
+            },
+            "delta": {"overfit_gap": 0.05},
+        }
+    ]
+    with (run / "history.jsonl").open("w", encoding="utf-8") as f:
+        for rec in history:
+            f.write(json.dumps(rec) + "\n")
+    _write(
+        run / "baseline" / "baseline.json",
+        json.dumps(
+            {
+                "primary": {
+                    "heldout_instant": {"accuracy": 0.06, "total": 200, "correct": 12, "ci": {"half_width": 0.03}},
+                    "heldout_high": {"accuracy": 0.52, "total": 200, "correct": 104, "ci": {"half_width": 0.07}},
+                    "train_seed_instant": {"accuracy": 0.055, "total": 200, "correct": 11},
+                    "train_seed_high": {"accuracy": 0.52, "total": 200, "correct": 104},
+                    "heldout_instant_vs_high": {"diff": 0.46},
+                }
+            }
+        ),
+    )
+    snap = build_snapshot(run)
+    s = snap["evals"]["series"]
+    assert s["iteration"][0] == 0
+    assert s["is_baseline"][0] is True
+    assert s["heldout_instant_post"][0] == 0.06
+    assert s["heldout_high_post"][0] == 0.52
+    # loop iter 0 becomes generation 1
+    assert s["iteration"][1] == 1
+    assert s["heldout_instant_post"][1] == 0.15
+    assert snap["baseline"]["heldout_instant"] == 0.06
+
+
 def test_in_progress_point_from_eval_progress(tmp_path: Path) -> None:
     from dashboard.data_loader import build_snapshot
 

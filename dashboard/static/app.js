@@ -78,24 +78,28 @@ function renderKpis(snap) {
     {
       label: "Phase",
       value: `<span class="phase-badge ${phaseClass(h.phase)}${h.eval_in_progress ? " train" : ""}">${
-        h.eval_in_progress ? "eval…" : h.phase || "—"
+        h.eval_in_progress ? "eval…" : escapeHtml(h.phase || "—")
       }</span>`,
-      delta: h.message ? `<span class="delta neu">${escapeHtml(h.message).slice(0, 80)}</span>` : "",
+      delta: h.message
+        ? `<span class="delta neu" title="${escapeHtml(h.message)}">${escapeHtml(h.message).slice(0, 100)}</span>`
+        : "",
     },
     {
       label: "Iteration",
       value: h.iteration != null ? String(h.iteration) : "—",
-      delta: h.stopped ? `<span class="delta neg">${escapeHtml(h.stop_reason || "stopped")}</span>` : `<span class="delta neu">running</span>`,
+      delta: h.stopped
+        ? `<span class="delta neg">${escapeHtml(h.stop_reason || "stopped")}</span>`
+        : `<span class="delta neu">${h.eval_in_progress ? "eval running" : "running"}</span>`,
     },
     {
-      label: "Train-seed instant",
-      value: pct(h.train_seed_instant),
-      delta: deltaHtml(h.last_instant_delta),
-    },
-    {
-      label: "Held-out test instant",
-      value: pct(h.heldout_instant),
+      label: "Held-out instant / high",
+      value: `${pct(h.heldout_instant)} / ${pct(h.heldout_high)}`,
       delta: deltaHtml(h.last_heldout_instant_delta),
+    },
+    {
+      label: "Train-seed instant / high",
+      value: `${pct(h.train_seed_instant)} / ${pct(h.train_seed_high)}`,
+      delta: deltaHtml(h.last_instant_delta),
     },
     {
       label: "Overfit gap",
@@ -128,6 +132,14 @@ function renderKpis(snap) {
           ? `±${Number(h.target_ci_pp).toFixed(1)} pp`
           : "—",
       delta: `<span class="delta neu">p&lt;${h.p_value ?? "0.05"}</span>`,
+    },
+    {
+      label: "Baseline heldout instant",
+      value: pct(h.baseline_heldout_instant),
+      delta:
+        h.baseline_heldout_high != null
+          ? `<span class="delta neu">high ${pct(h.baseline_heldout_high)}</span>`
+          : `<span class="delta neu">parent base model</span>`,
     },
   ];
 
@@ -211,8 +223,14 @@ function renderCheckpoints(snap) {
 
 function renderEvals(snap) {
   const legend = snap.evals?.legend || {};
+  const bl = snap.baseline || {};
   $("evalLegend").textContent =
-    (legend.train_seed || "") + " · " + (legend.heldout || "");
+    (legend.train_seed || "") +
+    " · " +
+    (legend.heldout || "") +
+    (bl.heldout_instant != null
+      ? ` · baseline heldout instant ${pct(bl.heldout_instant)} / high ${pct(bl.heldout_high)}`
+      : "");
 
   const latest = snap.evals?.latest || {};
   const train = latest.train_seed || {};
@@ -222,12 +240,24 @@ function renderEvals(snap) {
   const preT = train.pre || {};
   const preH = held.pre || {};
 
-  const panel = (cls, title, desc, post, pre, delta) => `
+  const vsBaseline = (cur, base) => {
+    if (cur == null || base == null || Number.isNaN(cur) || Number.isNaN(base))
+      return "";
+    const d = cur - base;
+    const cls = d > 1e-6 ? "pos" : d < -1e-6 ? "neg" : "neu";
+    const sign = d > 0 ? "+" : "";
+    return `<div class="metric-row"><span class="k">vs baseline</span><span class="v ${cls}">${sign}${(100 * d).toFixed(1)} pp</span></div>`;
+  };
+
+  const panel = (cls, title, desc, post, pre, delta, baseInstant, baseHigh) => `
     <div class="eval-panel ${cls}">
       <h3>${title}</h3>
       <div class="desc">${escapeHtml(desc)}</div>
       <div class="metric-row"><span class="k">Instant (post)</span><span class="v ${cls}">${pct(post.instant)}</span></div>
+      ${vsBaseline(post.instant, baseInstant)}
       <div class="metric-row"><span class="k">High (post)</span><span class="v high">${pct(post.high)}</span></div>
+      ${vsBaseline(post.high, baseHigh)}
+      <div class="metric-row"><span class="k">Baseline instant / high</span><span class="v">${pct(baseInstant)} / ${pct(baseHigh)}</span></div>
       <div class="metric-row"><span class="k">Instant−High gap</span><span class="v">${post.gap == null || Number.isNaN(post.gap) ? "—" : num(post.gap)}</span></div>
       <div class="metric-row"><span class="k">Instant (pre)</span><span class="v">${pct(pre.instant)}</span></div>
       <div class="metric-row"><span class="k">Δ instant (pre→post)</span><span class="v">${delta == null ? "—" : ((100 * delta) >= 0 ? "+" : "") + (100 * delta).toFixed(2) + " pp"}</span></div>
@@ -241,7 +271,9 @@ function renderEvals(snap) {
       legend.train_seed || "In-domain sample from train split",
       postT,
       preT,
-      train.delta_instant
+      train.delta_instant,
+      bl.train_seed_instant,
+      bl.train_seed_high
     ) +
     panel(
       "heldout",
@@ -249,7 +281,9 @@ function renderEvals(snap) {
       legend.heldout || "Never-train test set",
       postH,
       preH,
-      held.delta_instant
+      held.delta_instant,
+      bl.heldout_instant,
+      bl.heldout_high
     );
 }
 
@@ -265,12 +299,24 @@ function ensureCharts() {
   if (!state.accChart) {
     state.accChart = new Chart($("accChart"), {
       type: "line",
-      data: { labels: [], datasets: [] },
+      data: { datasets: [] },
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        interaction: { mode: "index", intersect: false },
-        plugins: { legend: { display: false } },
+        interaction: { mode: "nearest", intersect: false, axis: "x" },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              title: (items) => {
+                const x = items[0]?.parsed?.x;
+                if (x === 0) return "Generation 0 · baseline";
+                if (x == null) return "";
+                return `Generation ${x}`;
+              },
+            },
+          },
+        },
         scales: {
           y: {
             min: 0,
@@ -281,8 +327,16 @@ function ensureCharts() {
             grid: { color: "rgba(148,163,184,0.08)" },
           },
           x: {
-            title: { display: true, text: "Iteration" },
-            grid: { display: false },
+            type: "linear",
+            title: { display: true, text: "Generation (0 = baseline)" },
+            min: 0,
+            suggestedMax: 2,
+            ticks: {
+              stepSize: 1,
+              precision: 0,
+              callback: (v) => (Number.isInteger(v) ? String(v) : ""),
+            },
+            grid: { color: "rgba(148,163,184,0.06)" },
           },
         },
       },
@@ -330,185 +384,192 @@ function ensureCharts() {
 function updateCharts(snap) {
   if (typeof Chart === "undefined") return;
   ensureCharts();
-  const s = snap.evals?.series || {};
-  const ip = snap.in_progress || s.in_progress || null;
-  // Build labels: history iters + optional provisional "live" x label
-  const histLabels = (s.iteration || []).map((i) => (i == null ? "?" : String(i)));
-  let labels = histLabels.slice();
-  let ipIndex = -1;
-  if (ip && ip.iteration != null) {
-    const lab = String(ip.iteration);
-    // Reuse existing index if same iteration already in history
-    ipIndex = labels.findIndex((x) => x === lab);
-    if (ipIndex < 0) {
-      labels = labels.concat([`${lab}·live`]);
-      ipIndex = labels.length - 1;
-    }
-  }
-  const n = labels.length;
-  const pad = (arr) => {
-    const a = (arr || []).slice();
-    while (a.length < n) a.push(null);
-    return a;
-  };
+  const chart = snap.evals?.series?.chart || {};
+  const points = chart.points || [];
+  const live = chart.live || snap.in_progress || null;
 
-  const line = (label, data, color, dash, opts = {}) => ({
+  const seriesLine = (label, data, color, opts = {}) => ({
     label,
-    data: pad(data),
+    data,
     borderColor: color,
     backgroundColor: color + "33",
-    tension: 0.25,
-    borderWidth: opts.borderWidth ?? 2.2,
-    pointRadius: opts.pointRadius ?? 3,
-    pointHoverRadius: 5,
+    tension: 0.2,
+    borderWidth: opts.borderWidth ?? 2.4,
+    pointRadius: opts.pointRadius ?? 4,
+    pointHoverRadius: 6,
     pointStyle: opts.pointStyle || "circle",
     spanGaps: true,
-    borderDash: dash || [],
+    borderDash: opts.borderDash || [],
     showLine: opts.showLine !== false,
     order: opts.order ?? 10,
+    parsing: false,
   });
 
-  const withBand = (label, data, half, color) => {
-    const base = line(label, data, color);
-    if (!half || !half.some((x) => x != null)) return [base];
-    const d = pad(data);
-    const h = pad(half);
-    const upper = d.map((y, i) =>
-      y == null || h[i] == null ? null : Math.min(1, y + h[i])
-    );
-    const lower = d.map((y, i) =>
-      y == null || h[i] == null ? null : Math.max(0, y - h[i])
-    );
-    return [
-      base,
-      {
-        ...line(`${label} CI+`, upper, color + "55", [2, 2], {
-          pointRadius: 0,
-          borderWidth: 1,
-          order: 20,
-        }),
-        backgroundColor: "transparent",
-      },
-      {
-        ...line(`${label} CI-`, lower, color + "55", [2, 2], {
-          pointRadius: 0,
-          borderWidth: 1,
-          order: 20,
-        }),
-        backgroundColor: "transparent",
-      },
-    ];
-  };
-
-  // Sparse series: only the in-progress index is filled
-  const sparse = (y) => {
-    const a = Array(n).fill(null);
-    if (ipIndex >= 0 && y != null && !Number.isNaN(y)) a[ipIndex] = y;
-    return a;
-  };
+  // Split baseline (gen 0) vs run (gen ≥ 1) so styles never mix
+  const runPts = points.filter((p) => p.kind !== "baseline");
+  const basePts = points.filter((p) => p.kind === "baseline");
+  const xyFrom = (arr, key) =>
+    arr
+      .filter((p) => p[key] != null && !Number.isNaN(p[key]))
+      .map((p) => ({ x: p.generation, y: p[key] }));
+  const bandFrom = (arr, key, halfKey, sign) =>
+    arr
+      .filter(
+        (p) =>
+          p[key] != null &&
+          p[halfKey] != null &&
+          !Number.isNaN(p[key]) &&
+          !Number.isNaN(p[halfKey])
+      )
+      .map((p) => ({
+        x: p.generation,
+        y: Math.max(0, Math.min(1, p[key] + sign * p[halfKey])),
+      }));
 
   const datasets = [
-    ...withBand(
-      "Train-seed instant",
-      s.train_seed_instant_post,
-      s.train_seed_instant_ci_half,
-      "#38bdf8"
+    // Baseline gen 0 — gray, large points, no connecting line into run
+    seriesLine("Baseline held-out instant", xyFrom(basePts, "heldout_instant"), "#94a3b8", {
+      pointRadius: 8,
+      borderWidth: 2,
+      showLine: false,
+      order: 5,
+    }),
+    seriesLine("Baseline held-out high", xyFrom(basePts, "heldout_high"), "#64748b", {
+      pointRadius: 7,
+      borderWidth: 2,
+      showLine: false,
+      order: 5,
+    }),
+    seriesLine("Baseline train-seed instant", xyFrom(basePts, "train_seed_instant"), "#94a3b888", {
+      pointRadius: 6,
+      showLine: false,
+      order: 5,
+    }),
+    // Finalized run generations
+    seriesLine("Held-out instant", xyFrom(runPts, "heldout_instant"), "#c084fc", {
+      pointRadius: 5,
+    }),
+    seriesLine("Held-out high", xyFrom(runPts, "heldout_high"), "#fbbf24", {
+      borderDash: [5, 4],
+      pointRadius: 4,
+    }),
+    seriesLine("Train-seed instant", xyFrom(runPts, "train_seed_instant"), "#38bdf8"),
+    seriesLine("Train-seed high", xyFrom(runPts, "train_seed_high"), "#f472b6", {
+      borderDash: [5, 4],
+    }),
+    seriesLine(
+      "Held-out instant CI+",
+      bandFrom(points, "heldout_instant", "heldout_instant_ci_half", +1),
+      "#c084fc55",
+      { pointRadius: 0, borderWidth: 1, borderDash: [2, 2], order: 20 }
     ),
-    ...withBand(
-      "Held-out instant",
-      s.heldout_instant_post,
-      s.heldout_instant_ci_half,
-      "#c084fc"
+    seriesLine(
+      "Held-out instant CI-",
+      bandFrom(points, "heldout_instant", "heldout_instant_ci_half", -1),
+      "#c084fc55",
+      { pointRadius: 0, borderWidth: 1, borderDash: [2, 2], order: 20 }
     ),
-    line("Train-seed high", s.train_seed_high_post, "#f472b6", [5, 4]),
-    line("Held-out high", s.heldout_high_post, "#fbbf24", [5, 4]),
   ];
 
-  if (ip && ipIndex >= 0) {
-    // In-progress evals: orange diamonds, dashed CI
-    if (ip.heldout_instant != null) {
+  // Live generation: separate series, diamond markers, not merged into solid history lines
+  if (live && live.generation != null) {
+    const gx = live.generation;
+    const livePt = (y) =>
+      y == null || Number.isNaN(y) ? [] : [{ x: gx, y }];
+    if (live.heldout_instant != null) {
       datasets.push(
-        line("In-progress heldout instant", sparse(ip.heldout_instant), "#fb923c", [6, 4], {
+        seriesLine("Live held-out instant", livePt(live.heldout_instant), "#fb923c", {
           pointStyle: "rectRot",
-          pointRadius: 8,
+          pointRadius: 9,
           borderWidth: 2.5,
+          showLine: false,
           order: 1,
         })
       );
-      if (ip.heldout_instant_ci_half != null) {
-        const hi = ip.heldout_instant + ip.heldout_instant_ci_half;
-        const lo = ip.heldout_instant - ip.heldout_instant_ci_half;
+      if (live.heldout_instant_ci_half != null) {
+        const hi = Math.min(1, live.heldout_instant + live.heldout_instant_ci_half);
+        const lo = Math.max(0, live.heldout_instant - live.heldout_instant_ci_half);
         datasets.push(
-          line("In-progress heldout CI+", sparse(Math.min(1, hi)), "#fb923c88", [2, 3], {
+          seriesLine("Live CI+", livePt(hi), "#fb923c88", {
             pointRadius: 0,
             borderWidth: 1.5,
+            borderDash: [2, 3],
+            showLine: false,
             order: 2,
           }),
-          line("In-progress heldout CI-", sparse(Math.max(0, lo)), "#fb923c88", [2, 3], {
+          seriesLine("Live CI-", livePt(lo), "#fb923c88", {
             pointRadius: 0,
             borderWidth: 1.5,
+            borderDash: [2, 3],
+            showLine: false,
             order: 2,
           })
         );
       }
     }
-    if (ip.heldout_high != null) {
+    if (live.heldout_high != null) {
       datasets.push(
-        line("In-progress heldout high", sparse(ip.heldout_high), "#fdba74", [4, 3], {
+        seriesLine("Live held-out high", livePt(live.heldout_high), "#fdba74", {
           pointStyle: "triangle",
-          pointRadius: 7,
-          borderWidth: 2,
+          pointRadius: 8,
+          showLine: false,
           order: 1,
         })
       );
     }
-    if (ip.train_seed_instant != null && ip.train_seed_instant !== ip.heldout_instant) {
+    if (live.train_seed_instant != null) {
       datasets.push(
-        line("In-progress train-seed instant", sparse(ip.train_seed_instant), "#38bdf8", [6, 4], {
+        seriesLine("Live train-seed instant", livePt(live.train_seed_instant), "#38bdf8", {
           pointStyle: "rectRot",
           pointRadius: 7,
-          borderWidth: 2,
+          showLine: false,
           order: 1,
         })
       );
     }
-    // In-progress / intermediate checkpoint: yellow open circle
-    if ((ip.kinds || []).includes("checkpoint") && ip.checkpoint_y != null) {
+    if ((live.kinds || []).includes("checkpoint") && live.checkpoint_y != null) {
       datasets.push(
-        line("In-progress checkpoint", sparse(ip.checkpoint_y), "#facc15", [], {
+        seriesLine("Live checkpoint", livePt(live.checkpoint_y), "#facc15", {
           pointStyle: "circle",
-          pointRadius: 9,
+          pointRadius: 10,
           borderWidth: 3,
           showLine: false,
           order: 0,
         })
       );
     }
-    const hint = $("chartHint");
-    if (hint) {
-      hint.textContent = ip.label
-        ? `In progress: ${ip.label}`
-        : "Solid = finalized · diamond = live eval · yellow = intermediate ckpt";
-    }
-  } else {
-    const hint = $("chartHint");
-    if (hint) {
-      hint.textContent =
-        "Solid = finalized · dashed/diamond = in-progress · ±CI bands";
-    }
   }
 
-  state.accChart.data.labels = labels;
-  state.accChart.data.datasets = datasets;
+  const xMax = Math.max(
+    chart.x_suggested_max ?? 2,
+    chart.x_max ?? 0,
+    live?.generation ?? 0,
+    2
+  );
+  state.accChart.options.scales.x.min = 0;
+  state.accChart.options.scales.x.suggestedMax = xMax;
+  state.accChart.options.scales.x.max = xMax;
+  state.accChart.data.datasets = datasets.filter((d) => (d.data || []).length > 0);
   state.accChart.update("none");
 
-  state.gapChart.data.labels = labels;
+  const hint = $("chartHint");
+  if (hint) {
+    const nFinal = points.filter((p) => p.kind === "finalized").length;
+    const parts = [`gen 0 = baseline`];
+    if (nFinal) parts.push(`${nFinal} finalized`);
+    if (live) parts.push(live.label || "live");
+    hint.textContent = parts.join(" · ");
+  }
+
+  // Gap chart: one bar per generation (skip empty)
+  const gapPts = points.filter((p) => p.overfit_gap != null);
+  state.gapChart.data.labels = gapPts.map((p) => String(p.generation));
   state.gapChart.data.datasets = [
     {
       label: "Overfit gap",
-      data: s.overfit_gap || [],
-      backgroundColor: (s.overfit_gap || []).map((v) =>
-        v == null ? "#5c6b86" : v > 0 ? "rgba(248,113,113,0.65)" : "rgba(52,211,153,0.65)"
+      data: gapPts.map((p) => p.overfit_gap),
+      backgroundColor: gapPts.map((v) =>
+        v.overfit_gap > 0 ? "rgba(248,113,113,0.65)" : "rgba(52,211,153,0.65)"
       ),
       borderRadius: 6,
     },

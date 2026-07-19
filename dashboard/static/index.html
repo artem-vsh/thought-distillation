@@ -31,13 +31,14 @@
       <div class="card">
         <div class="title-row">
           <h2>Accuracy over iterations</h2>
-          <span class="hint" id="chartHint">Solid = finalized · dashed/diamond = in-progress · ±CI bands</span>
+          <span class="hint" id="chartHint">Gen 0 = baseline · solid = finalized · diamond = live · ±CI</span>
         </div>
         <div class="chart-wrap"><canvas id="accChart"></canvas></div>
         <div class="legend">
-          <span><i class="swatch" style="background:var(--train)"></i> Train-seed instant (final)</span>
-          <span><i class="swatch" style="background:var(--heldout)"></i> Held-out instant (final)</span>
-          <span><i class="swatch" style="background:var(--high)"></i> High (final)</span>
+          <span><i class="swatch" style="background:var(--train)"></i> Train-seed instant</span>
+          <span><i class="swatch" style="background:var(--heldout)"></i> Held-out instant</span>
+          <span><i class="swatch" style="background:var(--high)"></i> High</span>
+          <span><i class="swatch" style="background:#94a3b8"></i> Gen 0 baseline</span>
           <span><i class="swatch" style="background:#fb923c;border-radius:0;transform:rotate(45deg)"></i> In-progress eval</span>
           <span><i class="swatch" style="background:#fbbf24;border:2px solid #fff;box-sizing:border-box"></i> In-progress checkpoint</span>
         </div>
