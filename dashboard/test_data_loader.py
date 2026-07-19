@@ -151,6 +151,42 @@ def test_history_series_high() -> None:
     assert series["overfit_gap"] == [0.1]
 
 
+def test_in_progress_point_from_eval_progress(tmp_path: Path) -> None:
+    from dashboard.data_loader import build_snapshot
+
+    run = tmp_path / "live"
+    run.mkdir()
+    _write(
+        run / "status.json",
+        json.dumps(
+            {
+                "run_dir": str(run),
+                "phase": "eval_post",
+                "iteration": 2,
+                "eval_in_progress": True,
+                "eval_progress": {
+                    "status": "in_progress",
+                    "tag": "post_heldout",
+                    "n": 80,
+                    "max_n": 200,
+                    "target_ci_pp": 2.0,
+                    "p_value": 0.05,
+                    "instant": {"accuracy": 0.35, "correct": 28, "total": 80},
+                    "high": {"accuracy": 0.55, "correct": 44, "total": 80},
+                    "instant_ci": {"half_width": 0.1},
+                },
+            }
+        ),
+    )
+    snap = build_snapshot(run)
+    ip = snap.get("in_progress")
+    assert ip is not None
+    assert "eval" in ip["kinds"]
+    assert ip["heldout_instant"] == 0.35
+    assert ip["heldout_high"] == 0.55
+    assert ip["heldout_instant_ci_half"] == 0.1
+
+
 def test_list_runs(tmp_path: Path) -> None:
     a = tmp_path / "run-a"
     b = tmp_path / "run-b"

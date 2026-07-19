@@ -366,6 +366,118 @@ def _count_csv_rows(path: Path) -> int | None:
         return None
 
 
+def _in_progress_point(
+    *,
+    status: dict[str, Any],
+    eval_progress_live: dict[str, Any],
+    ckpt_view: dict[str, Any],
+    history: list[dict[str, Any]],
+    headline: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build a single provisional chart point for live eval / intermediate ckpt.
+
+    Plotted on the same iteration axis as completed history, with a distinct
+    style on the dashboard (diamond / dashed).
+    """
+    prog = eval_progress_live.get("eval_progress") or status.get("eval_progress") or {}
+    eval_live = bool(
+        status.get("eval_in_progress")
+        or eval_progress_live.get("eval_in_progress")
+        or (isinstance(prog, dict) and prog.get("status") == "in_progress")
+    )
+    mid = ckpt_view.get("last_intermediate")
+    live_ckpt = None
+    if isinstance(mid, dict) and mid.get("role") in {"intermediate", "live_or_latest"}:
+        live_ckpt = mid
+    # Only surface intermediate if it is not the same as last finalized name
+    fin = ckpt_view.get("last_finalized")
+    if (
+        live_ckpt
+        and isinstance(fin, dict)
+        and live_ckpt.get("name") is not None
+        and live_ckpt.get("name") == fin.get("name")
+        and live_ckpt.get("role") != "live_or_latest"
+    ):
+        live_ckpt = None
+
+    if not eval_live and not live_ckpt:
+        return None
+
+    it = headline.get("iteration")
+    if it is None and history:
+        it = history[-1].get("iteration")
+    if it is None:
+        it = 0
+    # Place provisional point at current iteration index (may equal last history)
+    try:
+        it_f = float(it)
+    except (TypeError, ValueError):
+        it_f = float(len(history))
+
+    point: dict[str, Any] = {
+        "iteration": it_f,
+        "kinds": [],
+        "label": "",
+    }
+    if eval_live and isinstance(prog, dict):
+        point["kinds"].append("eval")
+        tag = str(prog.get("tag") or "eval")
+        instant = prog.get("instant") if isinstance(prog.get("instant"), dict) else {}
+        high = prog.get("high") if isinstance(prog.get("high"), dict) else {}
+        inst_ci = prog.get("instant_ci") if isinstance(prog.get("instant_ci"), dict) else {}
+        high_ci = prog.get("high_ci") if isinstance(prog.get("high_ci"), dict) else {}
+        # Prefer heldout tag for primary series; train_seed goes to train series
+        is_heldout = "heldout" in tag
+        is_train = "train" in tag
+        acc_i = instant.get("accuracy")
+        acc_h = high.get("accuracy")
+        half_i = inst_ci.get("half_width")
+        half_h = high_ci.get("half_width")
+        if is_heldout or not is_train:
+            point["heldout_instant"] = acc_i
+            point["heldout_high"] = acc_h
+            point["heldout_instant_ci_half"] = half_i
+            point["heldout_high_ci_half"] = half_h
+        if is_train or not is_heldout:
+            point["train_seed_instant"] = acc_i
+            point["train_seed_high"] = acc_h
+            point["train_seed_instant_ci_half"] = half_i
+        point["n"] = prog.get("n")
+        point["max_n"] = prog.get("max_n") or prog.get("n_pool")
+        point["target_ci_pp"] = prog.get("target_ci_pp")
+        point["p_value"] = prog.get("p_value")
+        point["comparisons"] = prog.get("comparisons") or []
+        point["tag"] = tag
+        point["label"] = f"eval {tag} n={prog.get('n')}/{prog.get('max_n') or prog.get('n_pool')}"
+
+    if live_ckpt:
+        point["kinds"].append("checkpoint")
+        point["checkpoint"] = {
+            "name": live_ckpt.get("name"),
+            "batch": live_ckpt.get("batch"),
+            "iteration": live_ckpt.get("iteration"),
+            "role": live_ckpt.get("role"),
+            "sampler_path": live_ckpt.get("sampler_path"),
+            "state_path": live_ckpt.get("state_path"),
+        }
+        # Marker y: last known heldout instant, else mid accuracy scale
+        y_ref = point.get("heldout_instant")
+        if y_ref is None and history:
+            last = history[-1]
+            y_ref = _acc(
+                (last.get("heldout") or {}).get("post")
+                if isinstance(last.get("heldout"), dict)
+                else last.get("post_heldout")
+            )
+        if y_ref is None:
+            y_ref = headline.get("heldout_instant")
+        point["checkpoint_y"] = y_ref if y_ref is not None else 0.5
+        ck_lab = f"ckpt {live_ckpt.get('name') or live_ckpt.get('batch')}"
+        point["label"] = (point["label"] + " · " if point["label"] else "") + ck_lab
+
+    return point
+
+
 def build_snapshot(
     run_dir: Path | None,
     *,
@@ -475,6 +587,16 @@ def build_snapshot(
                     break
         series["heldout_gap_ci_half"].append(gap_half)
 
+    # Provisional in-progress point (same axes as completed series)
+    in_progress = _in_progress_point(
+        status=status,
+        eval_progress_live=eval_progress_live,
+        ckpt_view=ckpt_view,
+        history=history,
+        headline=headline,
+    )
+    series["in_progress"] = in_progress
+
     return {
         "ok": True,
         "generated_at": now,
@@ -486,6 +608,7 @@ def build_snapshot(
         "headline": headline,
         "status": status,
         "eval_live": eval_progress_live,
+        "in_progress": in_progress,
         "state": {
             "iteration": state.get("iteration"),
             "last_policy_state_path": state.get("last_policy_state_path"),

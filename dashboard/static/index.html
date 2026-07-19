@@ -27,27 +27,19 @@
       <!-- filled by JS -->
     </section>
 
-    <section class="card section-gap" id="evalLiveCard" style="display:none">
-      <div class="title-row">
-        <h2>Eval in progress</h2>
-        <span class="hint" id="evalLiveHint">Adaptive CI sampling</span>
-      </div>
-      <div id="evalLiveBody" class="empty">—</div>
-      <div class="bar" id="evalLiveBar"><i id="evalLiveBarFill"></i></div>
-    </section>
-
     <section class="grid main">
       <div class="card">
         <div class="title-row">
           <h2>Accuracy over iterations</h2>
-          <span class="hint" id="chartHint">Post-train instant ± CI (target p)</span>
+          <span class="hint" id="chartHint">Solid = finalized · dashed/diamond = in-progress · ±CI bands</span>
         </div>
         <div class="chart-wrap"><canvas id="accChart"></canvas></div>
         <div class="legend">
-          <span><i class="swatch" style="background:var(--train)"></i> Train-seed instant (post)</span>
-          <span><i class="swatch" style="background:var(--heldout)"></i> Held-out test instant (post)</span>
-          <span><i class="swatch" style="background:var(--high)"></i> Train-seed high (post)</span>
-          <span><i class="swatch" style="background:#fbbf24"></i> Held-out high (post)</span>
+          <span><i class="swatch" style="background:var(--train)"></i> Train-seed instant (final)</span>
+          <span><i class="swatch" style="background:var(--heldout)"></i> Held-out instant (final)</span>
+          <span><i class="swatch" style="background:var(--high)"></i> High (final)</span>
+          <span><i class="swatch" style="background:#fb923c;border-radius:0;transform:rotate(45deg)"></i> In-progress eval</span>
+          <span><i class="swatch" style="background:#fbbf24;border:2px solid #fff;box-sizing:border-box"></i> In-progress checkpoint</span>
         </div>
       </div>
 

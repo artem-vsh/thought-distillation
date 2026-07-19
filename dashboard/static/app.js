@@ -68,42 +68,6 @@ function setLive(ok, text) {
   label.textContent = text;
 }
 
-function renderEvalLive(snap) {
-  const card = $("evalLiveCard");
-  const body = $("evalLiveBody");
-  const hint = $("evalLiveHint");
-  const fill = $("evalLiveBarFill");
-  const live = snap.eval_live || {};
-  const prog = live.eval_progress || snap.status?.eval_progress || {};
-  const inProg = !!(live.eval_in_progress || snap.headline?.eval_in_progress);
-  if (!inProg && !prog.n) {
-    card.style.display = "none";
-    return;
-  }
-  card.style.display = "block";
-  const n = prog.n ?? 0;
-  const maxN = prog.max_n ?? prog.n_pool ?? 1;
-  const pctDone = Math.min(100, Math.round((100 * n) / maxN));
-  fill.style.width = `${pctDone}%`;
-  const status = prog.status || (inProg ? "in_progress" : "—");
-  hint.textContent = `${status} · target ±${prog.target_ci_pp ?? snap.headline?.target_ci_pp ?? "?"}pp @ p<${prog.p_value ?? snap.headline?.p_value ?? "?"}`;
-  const comps = (prog.comparisons || [])
-    .map(
-      (c) =>
-        `<div class="metric-row"><span class="k">${escapeHtml(c.name)}</span>` +
-        `<span class="v">Δ=${(100 * c.diff).toFixed(1)}pp ±${(100 * c.half_width).toFixed(1)}pp ` +
-        `${c.meets_target ? "✓" : "…"}</span></div>`
-    )
-    .join("");
-  body.innerHTML = `
-    <div class="metric-row"><span class="k">Tag</span><span class="v">${escapeHtml(prog.tag || "—")}</span></div>
-    <div class="metric-row"><span class="k">Sample n</span><span class="v">${n} / ${maxN} (pool ${prog.n_pool ?? "—"})</span></div>
-    <div class="metric-row"><span class="k">Instant</span><span class="v">${pct(prog.instant?.accuracy)}</span></div>
-    <div class="metric-row"><span class="k">High</span><span class="v">${pct(prog.high?.accuracy)}</span></div>
-    ${comps || '<div class="empty">Growing sample…</div>'}
-  `;
-}
-
 function renderKpis(snap) {
   const h = snap.headline || {};
   const ck = snap.checkpoints || {};
@@ -367,61 +331,83 @@ function updateCharts(snap) {
   if (typeof Chart === "undefined") return;
   ensureCharts();
   const s = snap.evals?.series || {};
-  const labels = (s.iteration || []).map((i) => (i == null ? "?" : String(i)));
+  const ip = snap.in_progress || s.in_progress || null;
+  // Build labels: history iters + optional provisional "live" x label
+  const histLabels = (s.iteration || []).map((i) => (i == null ? "?" : String(i)));
+  let labels = histLabels.slice();
+  let ipIndex = -1;
+  if (ip && ip.iteration != null) {
+    const lab = String(ip.iteration);
+    // Reuse existing index if same iteration already in history
+    ipIndex = labels.findIndex((x) => x === lab);
+    if (ipIndex < 0) {
+      labels = labels.concat([`${lab}·live`]);
+      ipIndex = labels.length - 1;
+    }
+  }
+  const n = labels.length;
+  const pad = (arr) => {
+    const a = (arr || []).slice();
+    while (a.length < n) a.push(null);
+    return a;
+  };
 
-  const line = (label, data, color, dash) => ({
+  const line = (label, data, color, dash, opts = {}) => ({
     label,
-    data: data || [],
+    data: pad(data),
     borderColor: color,
     backgroundColor: color + "33",
     tension: 0.25,
-    borderWidth: 2.2,
-    pointRadius: 3,
+    borderWidth: opts.borderWidth ?? 2.2,
+    pointRadius: opts.pointRadius ?? 3,
     pointHoverRadius: 5,
+    pointStyle: opts.pointStyle || "circle",
     spanGaps: true,
     borderDash: dash || [],
+    showLine: opts.showLine !== false,
+    order: opts.order ?? 10,
   });
 
-  // Error bars: Chart.js needs yMin/yMax point annotations via floating bars
-  // or chartjs-plugin-error-bars — use simple fill band via extra datasets.
   const withBand = (label, data, half, color) => {
     const base = line(label, data, color);
     if (!half || !half.some((x) => x != null)) return [base];
-    const upper = data.map((y, i) =>
-      y == null || half[i] == null ? null : Math.min(1, y + half[i])
+    const d = pad(data);
+    const h = pad(half);
+    const upper = d.map((y, i) =>
+      y == null || h[i] == null ? null : Math.min(1, y + h[i])
     );
-    const lower = data.map((y, i) =>
-      y == null || half[i] == null ? null : Math.max(0, y - half[i])
+    const lower = d.map((y, i) =>
+      y == null || h[i] == null ? null : Math.max(0, y - h[i])
     );
     return [
       base,
       {
-        label: `${label} CI+`,
-        data: upper,
-        borderColor: color + "55",
+        ...line(`${label} CI+`, upper, color + "55", [2, 2], {
+          pointRadius: 0,
+          borderWidth: 1,
+          order: 20,
+        }),
         backgroundColor: "transparent",
-        borderWidth: 1,
-        borderDash: [2, 2],
-        pointRadius: 0,
-        tension: 0.2,
-        spanGaps: true,
       },
       {
-        label: `${label} CI-`,
-        data: lower,
-        borderColor: color + "55",
+        ...line(`${label} CI-`, lower, color + "55", [2, 2], {
+          pointRadius: 0,
+          borderWidth: 1,
+          order: 20,
+        }),
         backgroundColor: "transparent",
-        borderWidth: 1,
-        borderDash: [2, 2],
-        pointRadius: 0,
-        tension: 0.2,
-        spanGaps: true,
       },
     ];
   };
 
-  state.accChart.data.labels = labels;
-  state.accChart.data.datasets = [
+  // Sparse series: only the in-progress index is filled
+  const sparse = (y) => {
+    const a = Array(n).fill(null);
+    if (ipIndex >= 0 && y != null && !Number.isNaN(y)) a[ipIndex] = y;
+    return a;
+  };
+
+  const datasets = [
     ...withBand(
       "Train-seed instant",
       s.train_seed_instant_post,
@@ -437,6 +423,83 @@ function updateCharts(snap) {
     line("Train-seed high", s.train_seed_high_post, "#f472b6", [5, 4]),
     line("Held-out high", s.heldout_high_post, "#fbbf24", [5, 4]),
   ];
+
+  if (ip && ipIndex >= 0) {
+    // In-progress evals: orange diamonds, dashed CI
+    if (ip.heldout_instant != null) {
+      datasets.push(
+        line("In-progress heldout instant", sparse(ip.heldout_instant), "#fb923c", [6, 4], {
+          pointStyle: "rectRot",
+          pointRadius: 8,
+          borderWidth: 2.5,
+          order: 1,
+        })
+      );
+      if (ip.heldout_instant_ci_half != null) {
+        const hi = ip.heldout_instant + ip.heldout_instant_ci_half;
+        const lo = ip.heldout_instant - ip.heldout_instant_ci_half;
+        datasets.push(
+          line("In-progress heldout CI+", sparse(Math.min(1, hi)), "#fb923c88", [2, 3], {
+            pointRadius: 0,
+            borderWidth: 1.5,
+            order: 2,
+          }),
+          line("In-progress heldout CI-", sparse(Math.max(0, lo)), "#fb923c88", [2, 3], {
+            pointRadius: 0,
+            borderWidth: 1.5,
+            order: 2,
+          })
+        );
+      }
+    }
+    if (ip.heldout_high != null) {
+      datasets.push(
+        line("In-progress heldout high", sparse(ip.heldout_high), "#fdba74", [4, 3], {
+          pointStyle: "triangle",
+          pointRadius: 7,
+          borderWidth: 2,
+          order: 1,
+        })
+      );
+    }
+    if (ip.train_seed_instant != null && ip.train_seed_instant !== ip.heldout_instant) {
+      datasets.push(
+        line("In-progress train-seed instant", sparse(ip.train_seed_instant), "#38bdf8", [6, 4], {
+          pointStyle: "rectRot",
+          pointRadius: 7,
+          borderWidth: 2,
+          order: 1,
+        })
+      );
+    }
+    // In-progress / intermediate checkpoint: yellow open circle
+    if ((ip.kinds || []).includes("checkpoint") && ip.checkpoint_y != null) {
+      datasets.push(
+        line("In-progress checkpoint", sparse(ip.checkpoint_y), "#facc15", [], {
+          pointStyle: "circle",
+          pointRadius: 9,
+          borderWidth: 3,
+          showLine: false,
+          order: 0,
+        })
+      );
+    }
+    const hint = $("chartHint");
+    if (hint) {
+      hint.textContent = ip.label
+        ? `In progress: ${ip.label}`
+        : "Solid = finalized · diamond = live eval · yellow = intermediate ckpt";
+    }
+  } else {
+    const hint = $("chartHint");
+    if (hint) {
+      hint.textContent =
+        "Solid = finalized · dashed/diamond = in-progress · ±CI bands";
+    }
+  }
+
+  state.accChart.data.labels = labels;
+  state.accChart.data.datasets = datasets;
   state.accChart.update("none");
 
   state.gapChart.data.labels = labels;
@@ -564,7 +627,6 @@ async function refresh() {
 
     setLive(true, `live · ${timeAgo(snap.headline?.updated_at || snap.generated_at)}`);
     renderKpis(snap);
-    renderEvalLive(snap);
     renderCheckpoints(snap);
     renderEvals(snap);
     renderTimeline(snap);
