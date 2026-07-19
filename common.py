@@ -18,18 +18,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
-# This directory is the project root (run from here: ``cd loop && python -m …``).
+# This directory is the standalone project root (``cd loop && python -m …``).
 LOOP_ROOT = Path(__file__).resolve().parent
-# Parent sandbox holds ask_arithmetic / test_arithmetic / train_math_llm_judge.
-MATH_ROOT = LOOP_ROOT.parent
-# Back-compat alias used by math_integration script paths.
-REPO_ROOT = MATH_ROOT
+# All math scripts and data live here too (no parent-sandbox dependency).
+MATH_ROOT = LOOP_ROOT
+REPO_ROOT = LOOP_ROOT
 
-# Prefer local data/; fall back to parent sandbox data/.
 _LOOP_SEED = LOOP_ROOT / "data" / "arithmetic_operations.csv"
-_MATH_SEED = MATH_ROOT / "data" / "arithmetic_operations.csv"
-DEFAULT_SEED_DATA = _LOOP_SEED if _LOOP_SEED.is_file() else _MATH_SEED
-# Runs live under loop/output/ so the project is self-contained.
+DEFAULT_SEED_DATA = _LOOP_SEED
 DEFAULT_RUNS_ROOT = LOOP_ROOT / "output" / "autoresearch"
 DEFAULT_MODEL = "openai/gpt-oss-20b"
 
@@ -717,8 +713,7 @@ def run_python(args: Sequence[str], *, cwd: Path | None = None) -> None:
     """Run a python module/script; raise on non-zero exit."""
     cmd = [sys.executable, *args]
     print(f"+ {' '.join(cmd)}", flush=True)
-    # Math scripts live in MATH_ROOT; prefer that cwd so relative imports resolve.
-    subprocess.run(cmd, check=True, cwd=str(cwd or MATH_ROOT))
+    subprocess.run(cmd, check=True, cwd=str(cwd or LOOP_ROOT))
 
 
 def save_json(path: Path, data: Any) -> None:

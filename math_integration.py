@@ -1,12 +1,11 @@
-"""Integration anchors for existing math pipeline scripts.
+"""Integration anchors for local math pipeline scripts.
 
-The loop does **not** reimplement ask / test / train. It shells out to (or
-imports from) the same modules used outside the loop:
+Shells out to (or imports from) vendored modules in this project:
 
   - ``ask_arithmetic.py``     — sampling (instant / high / …)
   - ``test_arithmetic.py``    — programmatic scoring of answers
   - ``train_math_llm_judge.py`` — Tinker RL (instant policy, high judge)
-  - ``data/arithmetic_operations.csv`` — also mirrored at ``data/``
+  - ``data/arithmetic_operations.csv`` — seed dataset
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ from common import (
 )
 
 # ---------------------------------------------------------------------------
-# Script paths (parent sandbox = MATH_ROOT / REPO_ROOT)
+# Script paths (this project root)
 # ---------------------------------------------------------------------------
 
 ASK_ARITHMETIC_SCRIPT = REPO_ROOT / "ask_arithmetic.py"
@@ -37,7 +36,7 @@ REPO_SEED_DATA = REPO_ROOT / "data" / "arithmetic_operations.csv"
 
 
 def default_seed_data() -> Path:
-    """Prefer local data/ copy; fall back to parent sandbox data/."""
+    """Prefer project data/ seed CSV."""
     if LOOP_SEED_DATA.is_file():
         return LOOP_SEED_DATA
     return REPO_SEED_DATA

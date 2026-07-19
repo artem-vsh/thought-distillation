@@ -1,34 +1,32 @@
 # Math autoresearch loop
 
-**This directory is the project root.** Run everything from here:
+**Standalone project.** Everything you need lives in this directory (math
+scripts, data, dashboard, git). No parent-folder imports.
 
 ```bash
 cd loop
-source ../.venv/bin/activate   # or your env with tinker installed
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+# Also put TINKER_API_KEY in the env or ~/.secrets/tinker.env
+
 python -m autoresearch …
 python -m dashboard --open
 ```
 
 Closed loop that grows math training data, measures the **instant vs high**
 gap, trains the instant policy with a high-reasoning LLM judge, then re-evals
-until gains are marginal. Artifacts land in **`output/autoresearch/`** inside
-this folder.
+until gains are marginal. Artifacts land in **`output/autoresearch/`**.
 
-## Integration with parent math scripts
+## Vendored math pipeline
 
-The loop **does not reimplement** the math pipeline. It calls scripts in the
-**parent** directory (`../`):
+| Local module | Role |
+|--------------|------|
+| `ask_arithmetic.py` | Eval sampling (`--instant` / `--high`, optional `--model-path`) |
+| `test_arithmetic.py` | Scoring + programmatic expression eval |
+| `train_math_llm_judge.py` | RL train (instant policy + high judge; optional `judge_model_path`) |
+| `data/arithmetic_operations.csv` | Seed dataset |
 
-| Parent script | Loop use |
-|---------------|----------|
-| `../ask_arithmetic.py` | Eval sampling (`--instant` / `--high`, optional `--model-path`) |
-| `../test_arithmetic.py` | Eval scoring (`operation,output` → `correct`) |
-| `../train_math_llm_judge.py` | RL train (instant policy + high judge; optional `judge_model_path`) |
-| `../data/arithmetic_operations.csv` | Seed source; mirrored at **`data/arithmetic_operations.csv`** |
-
-Shared constants (model name, renderers, prefill, judge defaults) are read from
-those scripts via `math_integration.py`. Each run writes `integration.json`
-so you can confirm wiring.
+Wiring helpers live in `math_integration.py`. Each run writes `integration.json`.
 
 Train CSVs are validated with `train_math_llm_judge.load_math_problems` before
 every train step (same schema: non-empty `operation` + `solution`).
@@ -130,8 +128,8 @@ teacher.
 ## Quick start
 
 ```bash
-cd /path/to/sandmech/loop
-source ../.venv/bin/activate
+cd loop
+source .venv/bin/activate   # after pip install -r requirements.txt
 
 python -m autoresearch \
   --seed-data data/arithmetic_operations.csv \

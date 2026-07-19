@@ -30,12 +30,10 @@ import shutil
 import sys
 from pathlib import Path
 
-# Project root is this package dir; parent holds ask/test/train math scripts.
+# Standalone project root (this directory).
 _LOOP_ROOT = Path(__file__).resolve().parent
-_MATH_ROOT = _LOOP_ROOT.parent
-for _p in (_LOOP_ROOT, _MATH_ROOT):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+if str(_LOOP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_LOOP_ROOT))
 
 from common import (
     DEFAULT_EVAL_SAMPLE_SIZE,

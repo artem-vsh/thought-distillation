@@ -21,12 +21,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-# loop/ is project root; parent sandbox has math scripts.
+# Standalone project root (parent of dashboard/).
 _LOOP_ROOT = Path(__file__).resolve().parent.parent
-_MATH_ROOT = _LOOP_ROOT.parent
-for _p in (_LOOP_ROOT, _MATH_ROOT):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+if str(_LOOP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_LOOP_ROOT))
 
 from dashboard.data_loader import (  # noqa: E402
     DEFAULT_RUNS_ROOT,
