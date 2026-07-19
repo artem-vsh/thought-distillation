@@ -3,15 +3,33 @@
 **Standalone project.** Everything you need lives in this directory (math
 scripts, data, dashboard, git). No parent-folder imports.
 
+Defaults live in **`loop_config.toml`** (step size, eval CI target, train knobs).
+CLI flags override the file.
+
 ```bash
 cd loop
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 # Also put TINKER_API_KEY in the env or ~/.secrets/tinker.env
 
+# Edit loop_config.toml, then:
 python -m autoresearch …
 python -m dashboard --open
 ```
+
+### Config highlights (`loop_config.toml`)
+
+| Key | Meaning | Default |
+|-----|---------|---------|
+| `generation.step_size` | New data rows to generate each iter | `200` |
+| `eval.target_ci_pp` | Adaptive-eval CI half-width (percentage points) | `2.0` |
+| `eval.p_value` | α for that CI (p&lt;0.05 → 95% CI) | `0.05` |
+| `eval.batch_size` | First chunk / growth step for eval n | `40` |
+| `eval.max_sample_size` | Exhaust cap | `500` |
+
+Evals grow the sample until **instant vs high** and **instant vs previous**
+differences both have half-width ≤ target (or the pool is exhausted). The
+dashboard shows live progress and ±CI bands on accuracy charts.
 
 Closed loop that grows math training data, measures the **instant vs high**
 gap, trains the instant policy with a high-reasoning LLM judge, then re-evals

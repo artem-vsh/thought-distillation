@@ -68,6 +68,42 @@ function setLive(ok, text) {
   label.textContent = text;
 }
 
+function renderEvalLive(snap) {
+  const card = $("evalLiveCard");
+  const body = $("evalLiveBody");
+  const hint = $("evalLiveHint");
+  const fill = $("evalLiveBarFill");
+  const live = snap.eval_live || {};
+  const prog = live.eval_progress || snap.status?.eval_progress || {};
+  const inProg = !!(live.eval_in_progress || snap.headline?.eval_in_progress);
+  if (!inProg && !prog.n) {
+    card.style.display = "none";
+    return;
+  }
+  card.style.display = "block";
+  const n = prog.n ?? 0;
+  const maxN = prog.max_n ?? prog.n_pool ?? 1;
+  const pctDone = Math.min(100, Math.round((100 * n) / maxN));
+  fill.style.width = `${pctDone}%`;
+  const status = prog.status || (inProg ? "in_progress" : "—");
+  hint.textContent = `${status} · target ±${prog.target_ci_pp ?? snap.headline?.target_ci_pp ?? "?"}pp @ p<${prog.p_value ?? snap.headline?.p_value ?? "?"}`;
+  const comps = (prog.comparisons || [])
+    .map(
+      (c) =>
+        `<div class="metric-row"><span class="k">${escapeHtml(c.name)}</span>` +
+        `<span class="v">Δ=${(100 * c.diff).toFixed(1)}pp ±${(100 * c.half_width).toFixed(1)}pp ` +
+        `${c.meets_target ? "✓" : "…"}</span></div>`
+    )
+    .join("");
+  body.innerHTML = `
+    <div class="metric-row"><span class="k">Tag</span><span class="v">${escapeHtml(prog.tag || "—")}</span></div>
+    <div class="metric-row"><span class="k">Sample n</span><span class="v">${n} / ${maxN} (pool ${prog.n_pool ?? "—"})</span></div>
+    <div class="metric-row"><span class="k">Instant</span><span class="v">${pct(prog.instant?.accuracy)}</span></div>
+    <div class="metric-row"><span class="k">High</span><span class="v">${pct(prog.high?.accuracy)}</span></div>
+    ${comps || '<div class="empty">Growing sample…</div>'}
+  `;
+}
+
 function renderKpis(snap) {
   const h = snap.headline || {};
   const ck = snap.checkpoints || {};
@@ -77,7 +113,9 @@ function renderKpis(snap) {
   const items = [
     {
       label: "Phase",
-      value: `<span class="phase-badge ${phaseClass(h.phase)}">${h.phase || "—"}</span>`,
+      value: `<span class="phase-badge ${phaseClass(h.phase)}${h.eval_in_progress ? " train" : ""}">${
+        h.eval_in_progress ? "eval…" : h.phase || "—"
+      }</span>`,
       delta: h.message ? `<span class="delta neu">${escapeHtml(h.message).slice(0, 80)}</span>` : "",
     },
     {
@@ -118,6 +156,14 @@ function renderKpis(snap) {
       delta: lastInt?.batch != null
         ? `<span class="delta neu">batch ${escapeHtml(String(lastInt.batch))}</span>`
         : `<span class="delta neu">${ck.count_intermediate ?? 0} mid</span>`,
+    },
+    {
+      label: "Target CI",
+      value:
+        h.target_ci_pp != null
+          ? `±${Number(h.target_ci_pp).toFixed(1)} pp`
+          : "—",
+      delta: `<span class="delta neu">p&lt;${h.p_value ?? "0.05"}</span>`,
     },
   ];
 
@@ -336,10 +382,58 @@ function updateCharts(snap) {
     borderDash: dash || [],
   });
 
+  // Error bars: Chart.js needs yMin/yMax point annotations via floating bars
+  // or chartjs-plugin-error-bars — use simple fill band via extra datasets.
+  const withBand = (label, data, half, color) => {
+    const base = line(label, data, color);
+    if (!half || !half.some((x) => x != null)) return [base];
+    const upper = data.map((y, i) =>
+      y == null || half[i] == null ? null : Math.min(1, y + half[i])
+    );
+    const lower = data.map((y, i) =>
+      y == null || half[i] == null ? null : Math.max(0, y - half[i])
+    );
+    return [
+      base,
+      {
+        label: `${label} CI+`,
+        data: upper,
+        borderColor: color + "55",
+        backgroundColor: "transparent",
+        borderWidth: 1,
+        borderDash: [2, 2],
+        pointRadius: 0,
+        tension: 0.2,
+        spanGaps: true,
+      },
+      {
+        label: `${label} CI-`,
+        data: lower,
+        borderColor: color + "55",
+        backgroundColor: "transparent",
+        borderWidth: 1,
+        borderDash: [2, 2],
+        pointRadius: 0,
+        tension: 0.2,
+        spanGaps: true,
+      },
+    ];
+  };
+
   state.accChart.data.labels = labels;
   state.accChart.data.datasets = [
-    line("Train-seed instant", s.train_seed_instant_post, "#38bdf8"),
-    line("Held-out instant", s.heldout_instant_post, "#c084fc"),
+    ...withBand(
+      "Train-seed instant",
+      s.train_seed_instant_post,
+      s.train_seed_instant_ci_half,
+      "#38bdf8"
+    ),
+    ...withBand(
+      "Held-out instant",
+      s.heldout_instant_post,
+      s.heldout_instant_ci_half,
+      "#c084fc"
+    ),
     line("Train-seed high", s.train_seed_high_post, "#f472b6", [5, 4]),
     line("Held-out high", s.heldout_high_post, "#fbbf24", [5, 4]),
   ];
@@ -470,6 +564,7 @@ async function refresh() {
 
     setLive(true, `live · ${timeAgo(snap.headline?.updated_at || snap.generated_at)}`);
     renderKpis(snap);
+    renderEvalLive(snap);
     renderCheckpoints(snap);
     renderEvals(snap);
     renderTimeline(snap);

@@ -1,0 +1,58 @@
+# Math autoresearch defaults (edit freely; CLI flags override when set).
+# Load path: loop_config.toml next to autoresearch.py, or LOOP_CONFIG env.
+
+[generation]
+# How many new unique validated-ish examples to aim for each iteration
+# (passed as gen_target / "step size").
+step_size = 200
+
+# Few-shot / batch knobs for the high-reasoning generator
+seed_samples = 40
+variations_per_batch = 5
+seeds_per_batch = 8
+temperature = 0.8
+
+[eval]
+# Adaptive eval stops when (1 - p_value) CIs on tracked differences are no
+# wider than ± target_ci_pp percentage points, or the eval pool is exhausted.
+#
+# Default: ±2.0 percentage points at p < 0.05  (i.e. 95% CI half-width ≤ 0.02)
+target_ci_pp = 2.0
+p_value = 0.05
+
+# Growing sample schedule
+batch_size = 40          # first chunk and each expansion step
+min_sample_size = 40     # never finish with fewer (unless pool is smaller)
+max_sample_size = 500    # hard cap even if CI still wide
+
+# Which differences must be precise enough before stopping growth
+compare_instant_vs_high = true
+compare_instant_vs_previous = true
+
+# Splits: held-out is the primary generalization track
+require_heldout_ci = true
+require_train_seed_ci = false
+
+# Fixed pools carved at run start (upper bound for adaptive growth)
+pool_size_heldout = 500
+pool_size_train_seed = 500
+
+[train]
+max_steps = 20
+groups_per_batch = 16
+group_size = 4
+save_every = 20
+eval_every = 20
+learning_rate = 1.0e-5
+lora_rank = 32
+
+[stop]
+# Instant accuracy must gain at least this (fraction) beyond noise band
+marginal_delta = 0.005
+marginal_streak = 2
+# Extra SE multiplier on top of binomial noise (0 disables)
+noise_z = 1.0
+max_iters = 10
+
+[data]
+heldout_fraction = 0.10

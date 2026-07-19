@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any  # noqa: F401 — used in nested helpers
 
 # Project root is loop/ (parent of dashboard/).
 LOOP_ROOT = Path(__file__).resolve().parent.parent
@@ -391,6 +391,7 @@ def build_snapshot(
     events = _read_jsonl(run_dir / "events.jsonl", limit=events_limit)
     checkpoints_indexed = _read_jsonl(run_dir / "checkpoints.jsonl")
     data_snapshots = _read_jsonl(run_dir / "data_snapshots.jsonl")
+    eval_progress_live = _read_json(run_dir / "eval_progress.json") or {}
 
     ckpt_view = _checkpoints_view(run_dir, checkpoints_indexed, history)
     latest_eval = _latest_eval_from_history(history)
@@ -420,7 +421,59 @@ def build_snapshot(
         "overfit_gap": status.get("last_overfit_gap") or latest_eval.get("overfit_gap"),
         "last_instant_delta": status.get("last_instant_delta"),
         "last_heldout_instant_delta": status.get("last_heldout_instant_delta"),
+        "eval_in_progress": bool(
+            status.get("eval_in_progress")
+            or eval_progress_live.get("eval_in_progress")
+        ),
+        "target_ci_pp": (eval_progress_live.get("eval_progress") or {}).get(
+            "target_ci_pp"
+        )
+        or (status.get("eval_progress") or {}).get("target_ci_pp")
+        or config.get("target_ci_pp"),
+        "p_value": (eval_progress_live.get("eval_progress") or {}).get("p_value")
+        or config.get("p_value"),
     }
+
+    # Series error bars from post heldout instant_ci when recorded in history
+    series["heldout_instant_ci_half"] = []
+    series["train_seed_instant_ci_half"] = []
+    series["heldout_gap_ci_half"] = []
+    for rec in history:
+        def _half(blob: Any, key: str = "instant") -> float | None:
+            if not isinstance(blob, dict):
+                return None
+            ci = blob.get("ci") if isinstance(blob.get("ci"), dict) else None
+            if not ci:
+                return None
+            side = ci.get(key) if key in ("instant", "high") else None
+            if isinstance(side, dict) and side.get("half_width") is not None:
+                return float(side["half_width"])
+            comps = ci.get("comparisons") or []
+            for c in comps:
+                if c.get("name") == key and c.get("half_width") is not None:
+                    return float(c["half_width"])
+            return None
+
+        post_h = (
+            (rec.get("heldout") or {}).get("post")
+            if isinstance(rec.get("heldout"), dict)
+            else rec.get("post_heldout")
+        )
+        post_t = (
+            (rec.get("train_seed") or {}).get("post")
+            if isinstance(rec.get("train_seed"), dict)
+            else rec.get("post_train") or rec.get("post")
+        )
+        series["heldout_instant_ci_half"].append(_half(post_h, "instant"))
+        series["train_seed_instant_ci_half"].append(_half(post_t, "instant"))
+        # high_minus_instant comparison half-width
+        gap_half = None
+        if isinstance(post_h, dict) and isinstance(post_h.get("ci"), dict):
+            for c in post_h["ci"].get("comparisons") or []:
+                if c.get("name") == "high_minus_instant":
+                    gap_half = c.get("half_width")
+                    break
+        series["heldout_gap_ci_half"].append(gap_half)
 
     return {
         "ok": True,
@@ -432,6 +485,7 @@ def build_snapshot(
         "runs": list_runs(run_dir.parent),
         "headline": headline,
         "status": status,
+        "eval_live": eval_progress_live,
         "state": {
             "iteration": state.get("iteration"),
             "last_policy_state_path": state.get("last_policy_state_path"),
@@ -465,6 +519,8 @@ def build_snapshot(
                     "(generalization)"
                 ),
             },
+            "target_ci_pp": headline.get("target_ci_pp"),
+            "p_value": headline.get("p_value"),
         },
         "data_growth": _data_growth(data_snapshots),
         "events": events,

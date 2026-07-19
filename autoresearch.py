@@ -88,9 +88,10 @@ from common import (
     write_split_manifest,
 )
 from generate_data import generate_variations
+from loop_config import EvalCIConfig, LoopConfig, load_loop_config, resolve_config_path
 from math_integration import check_model_consistency, write_integration_manifest
 from progress import ProgressTracker
-from run_evals import run_differential
+from sequential_eval import PrevInstantRef, run_sequential_differential
 from train_step import run_train_step
 from validate_data import validate_examples
 
@@ -119,6 +120,10 @@ _RESUMABLE_CONFIG_FIELDS = (
     "skip_generate",
     "skip_train",
     "skip_high_eval",
+    "target_ci_pp",
+    "p_value",
+    "eval_batch_size",
+    "eval_max_sample_size",
 )
 _IMMUTABLE_RESUME_FIELDS = {"heldout_fraction", "eval_sample_size"}
 # Explicit flags that are meaningful on resume even though they are not
@@ -416,6 +421,24 @@ def init_run(
     return run_dir, state, progress
 
 
+def _prev_instant_from_metrics(
+    metrics: DifferentialMetrics | None,
+    *,
+    label: str,
+) -> PrevInstantRef | None:
+    if metrics is None:
+        return None
+    inst = metrics.instant
+    if inst.total <= 0:
+        return None
+    return PrevInstantRef(
+        correct=inst.correct,
+        total=inst.total,
+        accuracy=inst.accuracy,
+        label=label,
+    )
+
+
 def _run_dual_evals(
     *,
     tag: str,
@@ -426,52 +449,42 @@ def _run_dual_evals(
     sampler_path: str | None,
     skip_high: bool,
     progress: ProgressTracker,
+    eval_ci: EvalCIConfig,
+    prev_train_instant: DifferentialMetrics | None = None,
+    prev_heldout_instant: DifferentialMetrics | None = None,
 ) -> tuple[DifferentialMetrics, DifferentialMetrics]:
-    """Run train-seed + held-out differentials; return (train_diff, heldout_diff)."""
+    """Run train-seed + held-out adaptive CI evals; return (train_diff, heldout_diff)."""
     base = ensure_dir(iter_dir / f"eval_{tag}")
     train_dir = ensure_dir(base / "train_seed")
     heldout_dir = ensure_dir(base / "heldout")
 
-    # Pin samples into the iter tree for self-contained artifacts.
-    if eval_train_sample.is_file():
-        shutil.copy2(eval_train_sample, train_dir / "eval_sample.csv")
-    if eval_heldout_sample.is_file():
-        shutil.copy2(eval_heldout_sample, heldout_dir / "eval_sample.csv")
-
     print(
-        f"[eval/{tag}] train-seed sample (in-domain) + held-out (never-train)",
+        f"[eval/{tag}] adaptive CI eval "
+        f"(target ±{eval_ci.target_ci_pp}pp @ p<{eval_ci.p_value}) "
+        f"train-seed + held-out",
         flush=True,
     )
-    train_diff = run_differential(
-        sample_csv=eval_train_sample,
-        out_dir=train_dir,
-        model=model,
-        instant_model_path=sampler_path,
-        high_model_path=sampler_path,
-        skip_high=skip_high,
-        tag=f"{tag}_train_seed",
-    )
-    progress.record_eval(
-        f"{tag}_train_seed",
-        instant_accuracy=train_diff.instant.accuracy,
-        high_accuracy=None if skip_high else train_diff.high.accuracy,
-        accuracy_gap=None if skip_high else train_diff.accuracy_gap,
-        out_dir=train_dir,
-        instant_answers=train_dir / "answers_instant.csv",
-        high_answers=None if skip_high else train_dir / "answers_high.csv",
-        differential_path=train_dir / "differential.json",
-        split="train_seed",
-    )
 
-    heldout_diff = run_differential(
-        sample_csv=eval_heldout_sample,
+    def _cb(snapshot: dict[str, Any]) -> None:
+        progress.set_eval_progress(snapshot)
+
+    # Held-out first (primary generalization track)
+    heldout_seq = run_sequential_differential(
+        pool_csv=eval_heldout_sample,
         out_dir=heldout_dir,
         model=model,
         instant_model_path=sampler_path,
         high_model_path=sampler_path,
         skip_high=skip_high,
+        cfg=eval_ci,
         tag=f"{tag}_heldout",
+        prev_instant=_prev_instant_from_metrics(
+            prev_heldout_instant, label="prev_heldout_instant"
+        ),
+        progress_path=heldout_dir / "eval_progress.json",
+        on_progress=_cb if eval_ci.require_heldout_ci else None,
     )
+    heldout_diff = heldout_seq.differential
     progress.record_eval(
         f"{tag}_heldout",
         instant_accuracy=heldout_diff.instant.accuracy,
@@ -484,11 +497,55 @@ def _run_dual_evals(
         split="heldout",
     )
 
+    train_seq = run_sequential_differential(
+        pool_csv=eval_train_sample,
+        out_dir=train_dir,
+        model=model,
+        instant_model_path=sampler_path,
+        high_model_path=sampler_path,
+        skip_high=skip_high,
+        cfg=eval_ci,
+        tag=f"{tag}_train_seed",
+        prev_instant=_prev_instant_from_metrics(
+            prev_train_instant, label="prev_train_seed_instant"
+        ),
+        progress_path=train_dir / "eval_progress.json",
+        on_progress=_cb if eval_ci.require_train_seed_ci else None,
+    )
+    train_diff = train_seq.differential
+    progress.record_eval(
+        f"{tag}_train_seed",
+        instant_accuracy=train_diff.instant.accuracy,
+        high_accuracy=None if skip_high else train_diff.high.accuracy,
+        accuracy_gap=None if skip_high else train_diff.accuracy_gap,
+        out_dir=train_dir,
+        instant_answers=train_dir / "answers_instant.csv",
+        high_answers=None if skip_high else train_dir / "answers_high.csv",
+        differential_path=train_dir / "differential.json",
+        split="train_seed",
+    )
+
+    progress.set_eval_progress(None)
+    # Persist CI summaries under the tag for metrics.json
+    save_json(
+        base / "sequential_ci.json",
+        {
+            "heldout": heldout_seq.to_dict(),
+            "train_seed": train_seq.to_dict(),
+            "eval_ci": {
+                "target_ci_pp": eval_ci.target_ci_pp,
+                "p_value": eval_ci.p_value,
+                "batch_size": eval_ci.batch_size,
+                "max_sample_size": eval_ci.max_sample_size,
+            },
+        },
+    )
+
     overfit = train_diff.instant.accuracy - heldout_diff.instant.accuracy
     print(
-        f"[eval/{tag}] train-seed instant={train_diff.instant.accuracy:.4f} | "
-        f"heldout instant={heldout_diff.instant.accuracy:.4f} | "
-        f"overfit_gap={overfit:+.4f}",
+        f"[eval/{tag}] train-seed instant={train_diff.instant.accuracy:.4f} "
+        f"(n={train_seq.n_used}) | heldout instant={heldout_diff.instant.accuracy:.4f} "
+        f"(n={heldout_seq.n_used}) | overfit_gap={overfit:+.4f}",
         flush=True,
     )
     return train_diff, heldout_diff
@@ -701,8 +758,11 @@ def run_iteration(
     skip_train: bool,
     skip_high_eval: bool,
     gen_temperature: float,
+    eval_ci: EvalCIConfig | None = None,
 ) -> LoopState:
     """Execute one full autoresearch iteration; mutate and return state."""
+    if eval_ci is None:
+        eval_ci = EvalCIConfig()
     run_dir = Path(state.run_dir)
     it = state.iteration
     train_data_path = Path(state.train_data)
@@ -726,6 +786,10 @@ def run_iteration(
         "skip_train": skip_train,
         "skip_high_eval": skip_high_eval,
         "gen_temperature": gen_temperature,
+        "target_ci_pp": eval_ci.target_ci_pp,
+        "p_value": eval_ci.p_value,
+        "eval_batch_size": eval_ci.batch_size,
+        "eval_max_sample_size": eval_ci.max_sample_size,
     }
     journal_path, journal = _load_or_create_iteration_journal(
         iter_dir=iter_dir,
@@ -965,6 +1029,26 @@ def run_iteration(
                 "eval_pre",
                 "Pre-train evals on train-seed sample AND held-out test",
             )
+            # Previous post metrics for instant-vs-previous CI (if any)
+            prev_post_train = None
+            prev_post_heldout = None
+            if state.metrics_history:
+                last = state.metrics_history[-1]
+                try:
+                    prev_post_train = DifferentialMetrics.from_dict(
+                        last.get("post_train")
+                        or (last.get("train_seed") or {}).get("post")
+                        or last.get("post")
+                    )
+                except (TypeError, KeyError, ValueError):
+                    prev_post_train = None
+                try:
+                    prev_post_heldout = DifferentialMetrics.from_dict(
+                        last.get("post_heldout")
+                        or (last.get("heldout") or {}).get("post")
+                    )
+                except (TypeError, KeyError, ValueError):
+                    prev_post_heldout = None
             pre_train, pre_heldout = _run_dual_evals(
                 tag="pre",
                 iter_dir=iter_dir,
@@ -974,6 +1058,9 @@ def run_iteration(
                 sampler_path=state.last_policy_sampler_path,
                 skip_high=skip_high_eval,
                 progress=progress,
+                eval_ci=eval_ci,
+                prev_train_instant=prev_post_train,
+                prev_heldout_instant=prev_post_heldout,
             )
             _mark_phase(journal_path, journal, "eval_pre")
 
@@ -1085,6 +1172,7 @@ def run_iteration(
             "eval_post",
             "Post-train evals on train-seed sample AND held-out test",
         )
+        # Post vs pre (this iter) for instant-vs-previous CI after training
         post_train, post_heldout = _run_dual_evals(
             tag="post",
             iter_dir=iter_dir,
@@ -1094,6 +1182,9 @@ def run_iteration(
             sampler_path=state.last_policy_sampler_path,
             skip_high=skip_high_eval,
             progress=progress,
+            eval_ci=eval_ci,
+            prev_train_instant=pre_train,
+            prev_heldout_instant=pre_heldout,
         )
         _mark_phase(journal_path, journal, "eval_post")
 
@@ -1166,7 +1257,56 @@ def run_iteration(
             "heldout_test": str(heldout_path),
             "metrics": str(iter_dir / "metrics.json"),
         },
+        "eval_ci": {
+            "target_ci_pp": eval_ci.target_ci_pp,
+            "p_value": eval_ci.p_value,
+            "batch_size": eval_ci.batch_size,
+            "max_sample_size": eval_ci.max_sample_size,
+        },
     }
+    # Attach sequential CI payloads onto post differentials for dashboard series
+    post_ci_path = iter_dir / "eval_post" / "sequential_ci.json"
+    if post_ci_path.is_file():
+        try:
+            seq = load_json(post_ci_path)
+            if isinstance(seq, dict):
+                if isinstance(record.get("heldout"), dict) and isinstance(
+                    record["heldout"].get("post"), dict
+                ):
+                    h_ci = (seq.get("heldout") or {}).get("differential", {})
+                    # Prefer full sequential result ci block
+                    record["heldout"]["post"]["ci"] = (seq.get("heldout") or {}).get(
+                        "comparisons"
+                    ) and {
+                        "comparisons": (seq.get("heldout") or {}).get("comparisons"),
+                        "instant": (seq.get("heldout") or {}).get("instant_ci"),
+                        "high": (seq.get("heldout") or {}).get("high_ci"),
+                        "n_used": (seq.get("heldout") or {}).get("n_used"),
+                        "target_met": (seq.get("heldout") or {}).get("target_met"),
+                        "exhausted": (seq.get("heldout") or {}).get("exhausted"),
+                        "p_value": eval_ci.p_value,
+                        "target_ci_pp": eval_ci.target_ci_pp,
+                        "target_half_width": eval_ci.target_half_width,
+                    }
+                if isinstance(record.get("train_seed"), dict) and isinstance(
+                    record["train_seed"].get("post"), dict
+                ):
+                    record["train_seed"]["post"]["ci"] = {
+                        "comparisons": (seq.get("train_seed") or {}).get("comparisons"),
+                        "instant": (seq.get("train_seed") or {}).get("instant_ci"),
+                        "high": (seq.get("train_seed") or {}).get("high_ci"),
+                        "n_used": (seq.get("train_seed") or {}).get("n_used"),
+                        "target_met": (seq.get("train_seed") or {}).get("target_met"),
+                        "exhausted": (seq.get("train_seed") or {}).get("exhausted"),
+                        "p_value": eval_ci.p_value,
+                        "target_ci_pp": eval_ci.target_ci_pp,
+                        "target_half_width": eval_ci.target_half_width,
+                    }
+                record["post_heldout"] = record["heldout"]["post"]
+                record["post_train"] = record["train_seed"]["post"]
+                record["post"] = record["train_seed"]["post"]
+        except (OSError, TypeError, ValueError):
+            pass
     save_json(iter_dir / "metrics.json", record)
     history_path = run_dir / "history.jsonl"
     _upsert_history_file(history_path, record)
@@ -1205,16 +1345,27 @@ def run_iteration(
     return state
 
 
-def build_parser(*, suppress_defaults: bool = False) -> argparse.ArgumentParser:
+def build_parser(
+    *,
+    suppress_defaults: bool = False,
+    loop_cfg: LoopConfig | None = None,
+) -> argparse.ArgumentParser:
     """Build the CLI parser.
 
     With ``suppress_defaults=True`` every default becomes ``argparse.SUPPRESS``
     so a second parse reveals exactly which options the user typed (used for
-    resume-override detection).
+    resume-override detection). Defaults come from ``loop_config.toml`` when present.
     """
+    cfg = loop_cfg or load_loop_config()
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--config",
+        type=Path,
+        default=resolve_config_path(),
+        help=f"Path to loop_config.toml (default: {resolve_config_path()})",
     )
     p.add_argument(
         "--seed-data",
@@ -1236,67 +1387,113 @@ def build_parser(*, suppress_defaults: bool = False) -> argparse.ArgumentParser:
         help="Resume an existing run directory (reads state.json)",
     )
     p.add_argument("--model", default=DEFAULT_MODEL)
-    p.add_argument("--max-iters", type=int, default=DEFAULT_MAX_ITERS)
+    p.add_argument("--max-iters", type=int, default=cfg.stop.max_iters)
     p.add_argument(
         "--marginal-delta",
         type=float,
-        default=DEFAULT_MARGINAL_DELTA,
+        default=cfg.stop.marginal_delta,
         help=(
             "Stop when instant accuracy gain is below this fraction "
-            f"(default: {DEFAULT_MARGINAL_DELTA})"
+            f"(default from config: {cfg.stop.marginal_delta})"
         ),
     )
     p.add_argument(
         "--marginal-streak",
         type=int,
-        default=DEFAULT_MARGINAL_STREAK,
+        default=cfg.stop.marginal_streak,
         help=(
             "Consecutive marginal iterations required to stop "
-            f"(default: {DEFAULT_MARGINAL_STREAK})"
+            f"(default from config: {cfg.stop.marginal_streak})"
         ),
     )
     p.add_argument(
         "--noise-z",
         type=float,
-        default=DEFAULT_NOISE_Z,
+        default=cfg.stop.noise_z,
         help=(
             "An instant-accuracy gain only counts as progress when it also "
             "exceeds noise_z × the binomial standard error of the pre/post "
             "comparison. 0 disables the noise band "
-            f"(default: {DEFAULT_NOISE_Z})"
+            f"(default from config: {cfg.stop.noise_z})"
         ),
     )
-    p.add_argument("--gen-target", type=int, default=DEFAULT_GEN_TARGET)
-    p.add_argument("--seed-samples", type=int, default=DEFAULT_SEED_SAMPLES)
+    p.add_argument(
+        "--gen-target",
+        "--step-size",
+        type=int,
+        default=cfg.generation.step_size,
+        dest="gen_target",
+        help=(
+            "New data rows to aim for each iteration (generation step size). "
+            f"Default from config generation.step_size: {cfg.generation.step_size}"
+        ),
+    )
+    p.add_argument("--seed-samples", type=int, default=cfg.generation.seed_samples)
     p.add_argument(
         "--variations-per-batch",
         type=int,
-        default=DEFAULT_VARIATIONS_PER_SEED,
+        default=cfg.generation.variations_per_batch,
     )
-    p.add_argument("--seeds-per-batch", type=int, default=DEFAULT_SEEDS_PER_BATCH)
-    p.add_argument("--gen-temperature", type=float, default=DEFAULT_GEN_TEMPERATURE)
-    p.add_argument("--eval-sample-size", type=int, default=DEFAULT_EVAL_SAMPLE_SIZE)
+    p.add_argument("--seeds-per-batch", type=int, default=cfg.generation.seeds_per_batch)
+    p.add_argument("--gen-temperature", type=float, default=cfg.generation.temperature)
+    p.add_argument(
+        "--eval-sample-size",
+        type=int,
+        default=max(cfg.eval.pool_size_heldout, cfg.eval.pool_size_train_seed),
+        help=(
+            "Max ops reserved for each eval pool at run start "
+            f"(default max of config pools: "
+            f"{max(cfg.eval.pool_size_heldout, cfg.eval.pool_size_train_seed)})"
+        ),
+    )
+    p.add_argument(
+        "--target-ci-pp",
+        type=float,
+        default=cfg.eval.target_ci_pp,
+        help=(
+            "Target CI half-width in percentage points for adaptive eval "
+            f"(default from config: {cfg.eval.target_ci_pp} @ p<{cfg.eval.p_value})"
+        ),
+    )
+    p.add_argument(
+        "--p-value",
+        type=float,
+        default=cfg.eval.p_value,
+        help=f"α for CI / significance (default from config: {cfg.eval.p_value})",
+    )
+    p.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=cfg.eval.batch_size,
+        help=f"Adaptive eval growth step (default: {cfg.eval.batch_size})",
+    )
+    p.add_argument(
+        "--eval-max-sample-size",
+        type=int,
+        default=cfg.eval.max_sample_size,
+        help=f"Hard cap on adaptive eval n (default: {cfg.eval.max_sample_size})",
+    )
     p.add_argument(
         "--heldout-fraction",
         type=float,
-        default=DEFAULT_HELDOUT_FRACTION,
+        default=cfg.data.heldout_fraction,
         help=(
             "Fraction of seed carved into a never-train held-out test set "
-            f"(default: {DEFAULT_HELDOUT_FRACTION}). Progress evals run on both "
-            "a train-seed sample and this held-out sample."
+            f"(default from config: {cfg.data.heldout_fraction}). Progress evals "
+            "run on both a train-seed sample and this held-out sample."
         ),
     )
-    p.add_argument("--train-max-steps", type=int, default=DEFAULT_TRAIN_MAX_STEPS)
+    p.add_argument("--train-max-steps", type=int, default=cfg.train.max_steps)
     p.add_argument(
         "--groups-per-batch",
         type=int,
-        default=DEFAULT_TRAIN_GROUPS_PER_BATCH,
+        default=cfg.train.groups_per_batch,
     )
-    p.add_argument("--group-size", type=int, default=DEFAULT_TRAIN_GROUP_SIZE)
-    p.add_argument("--save-every", type=int, default=DEFAULT_TRAIN_SAVE_EVERY)
-    p.add_argument("--eval-every", type=int, default=DEFAULT_TRAIN_EVAL_EVERY)
-    p.add_argument("--learning-rate", type=float, default=DEFAULT_TRAIN_LEARNING_RATE)
-    p.add_argument("--lora-rank", type=int, default=DEFAULT_TRAIN_LORA_RANK)
+    p.add_argument("--group-size", type=int, default=cfg.train.group_size)
+    p.add_argument("--save-every", type=int, default=cfg.train.save_every)
+    p.add_argument("--eval-every", type=int, default=cfg.train.eval_every)
+    p.add_argument("--learning-rate", type=float, default=cfg.train.learning_rate)
+    p.add_argument("--lora-rank", type=int, default=cfg.train.lora_rank)
     p.add_argument("--rng-seed", type=int, default=0)
     p.add_argument(
         "--force",
@@ -1332,7 +1529,32 @@ def build_parser(*, suppress_defaults: bool = False) -> argparse.ArgumentParser:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    return build_parser().parse_args(argv)
+    # First pass: discover --config if present, then rebuild defaults from it.
+    raw = list(argv) if argv is not None else sys.argv[1:]
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=Path, default=None)
+    pre_args, _ = pre.parse_known_args(raw)
+    cfg = load_loop_config(pre_args.config) if pre_args.config else load_loop_config()
+    return build_parser(loop_cfg=cfg).parse_args(raw)
+
+
+def eval_ci_from_args(args: argparse.Namespace, base: LoopConfig | None = None) -> EvalCIConfig:
+    """Merge CLI eval CI knobs onto the loaded config section."""
+    cfg = base or load_loop_config(getattr(args, "config", None))
+    e = cfg.eval
+    return EvalCIConfig(
+        target_ci_pp=float(args.target_ci_pp),
+        p_value=float(args.p_value),
+        batch_size=int(args.eval_batch_size),
+        min_sample_size=min(int(args.eval_batch_size), int(args.eval_max_sample_size)),
+        max_sample_size=int(args.eval_max_sample_size),
+        compare_instant_vs_high=e.compare_instant_vs_high and not args.skip_high_eval,
+        compare_instant_vs_previous=e.compare_instant_vs_previous,
+        require_heldout_ci=e.require_heldout_ci,
+        require_train_seed_ci=e.require_train_seed_ci,
+        pool_size_heldout=max(e.pool_size_heldout, int(args.eval_sample_size)),
+        pool_size_train_seed=max(e.pool_size_train_seed, int(args.eval_sample_size)),
+    )
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -1344,6 +1566,9 @@ def validate_args(args: argparse.Namespace) -> None:
         "variations_per_batch": args.variations_per_batch,
         "seeds_per_batch": args.seeds_per_batch,
         "eval_sample_size": args.eval_sample_size,
+        "eval_batch_size": args.eval_batch_size,
+        "eval_max_sample_size": args.eval_max_sample_size,
+        "target_ci_pp": args.target_ci_pp,
         "train_max_steps": args.train_max_steps,
         "groups_per_batch": args.groups_per_batch,
         "group_size": args.group_size,
@@ -1359,6 +1584,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("marginal_delta must be >= 0")
     if args.noise_z < 0:
         raise ValueError("noise_z must be >= 0")
+    if not 0.0 < args.p_value < 1.0:
+        raise ValueError("p_value must be in (0, 1)")
     if not args.skip_train and args.save_every > args.train_max_steps:
         raise ValueError(
             f"save_every ({args.save_every}) must be <= train_max_steps "
@@ -1375,6 +1602,14 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(raw_argv)
     args, resume_record = resolve_resume_config(args, argv=raw_argv)
     validate_args(args)
+    eval_ci = eval_ci_from_args(args)
+    print(
+        f"Config: step_size/gen_target={args.gen_target} | "
+        f"eval CI ±{args.target_ci_pp}pp @ p<{args.p_value} | "
+        f"batch={args.eval_batch_size} max_n={args.eval_max_sample_size} | "
+        f"source={getattr(args, 'config', None)}",
+        flush=True,
+    )
     for warning in check_model_consistency(args.model):
         print(f"WARNING: {warning}", flush=True)
     run_dir, state, progress = init_run(
@@ -1468,6 +1703,7 @@ def main(argv: list[str] | None = None) -> None:
             skip_train=args.skip_train,
             skip_high_eval=args.skip_high_eval,
             gen_temperature=args.gen_temperature,
+            eval_ci=eval_ci,
         )
         state.marginal_streak = marginal_improvement_streak(
             state.metrics_history,

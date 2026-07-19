@@ -27,11 +27,20 @@
       <!-- filled by JS -->
     </section>
 
+    <section class="card section-gap" id="evalLiveCard" style="display:none">
+      <div class="title-row">
+        <h2>Eval in progress</h2>
+        <span class="hint" id="evalLiveHint">Adaptive CI sampling</span>
+      </div>
+      <div id="evalLiveBody" class="empty">—</div>
+      <div class="bar" id="evalLiveBar"><i id="evalLiveBarFill"></i></div>
+    </section>
+
     <section class="grid main">
       <div class="card">
         <div class="title-row">
           <h2>Accuracy over iterations</h2>
-          <span class="hint" id="chartHint">Post-train instant accuracy</span>
+          <span class="hint" id="chartHint">Post-train instant ± CI (target p)</span>
         </div>
         <div class="chart-wrap"><canvas id="accChart"></canvas></div>
         <div class="legend">

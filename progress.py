@@ -59,6 +59,11 @@ class RunStatus:
     last_checkpoint_name: str | None = None
     policy_source: str | None = None  # "base" | "checkpoint"
     judge_source: str | None = None
+    # Adaptive eval (CI) live snapshot for the dashboard
+    eval_in_progress: bool = False
+    eval_progress: dict[str, Any] = field(default_factory=dict)
+    # Last completed CI summaries (heldout / train_seed)
+    last_eval_ci: dict[str, Any] = field(default_factory=dict)
     # Paths for the dashboard to open
     paths: dict[str, str] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
@@ -96,6 +101,41 @@ class ProgressTracker:
     def _flush_status(self) -> None:
         self.status.updated_at = _utc_now()
         save_json(self.status_path, self.status.to_dict())
+        # Dedicated file so dashboards can poll without rewriting whole status history
+        save_json(self.run_dir / "eval_progress.json", {
+            "eval_in_progress": self.status.eval_in_progress,
+            "eval_progress": self.status.eval_progress,
+            "last_eval_ci": self.status.last_eval_ci,
+            "updated_at": self.status.updated_at,
+            "iteration": self.status.iteration,
+            "phase": self.status.phase,
+        })
+
+    def set_eval_progress(self, snapshot: dict[str, Any] | None) -> None:
+        """Publish live adaptive-eval progress (or clear when None)."""
+        if snapshot is None:
+            self.status.eval_in_progress = False
+            self.status.eval_progress = {}
+        else:
+            self.status.eval_in_progress = snapshot.get("status") == "in_progress"
+            self.status.eval_progress = snapshot
+            if snapshot.get("status") == "complete":
+                tag = str(snapshot.get("tag") or "eval")
+                self.status.last_eval_ci[tag] = {
+                    "n": snapshot.get("n"),
+                    "n_pool": snapshot.get("n_pool"),
+                    "target_ci_pp": snapshot.get("target_ci_pp"),
+                    "p_value": snapshot.get("p_value"),
+                    "target_met": snapshot.get("target_met"),
+                    "exhausted": snapshot.get("exhausted"),
+                    "instant_ci": snapshot.get("instant_ci"),
+                    "high_ci": snapshot.get("high_ci"),
+                    "comparisons": snapshot.get("comparisons"),
+                    "instant": snapshot.get("instant"),
+                    "high": snapshot.get("high"),
+                }
+                self.status.eval_in_progress = False
+        self._flush_status()
 
     def event(
         self,
