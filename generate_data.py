@@ -20,8 +20,7 @@ import math
 import sys
 from pathlib import Path
 
-# Allow `python loop/generate_data.py` as well as `python -m generate_data`.
-# Project root is this package dir; parent holds ask/test/train math scripts.
+# Project root is this directory; parent holds ask/test/train math scripts.
 _LOOP_ROOT = Path(__file__).resolve().parent
 _MATH_ROOT = _LOOP_ROOT.parent
 for _p in (_LOOP_ROOT, _MATH_ROOT):
