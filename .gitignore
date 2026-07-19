@@ -1,0 +1,26 @@
+# Local env / secrets
+.env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Run artifacts (large; keep structure if you want with !)
+output/
+!output/.gitkeep
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

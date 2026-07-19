@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Math Autoresearch Dashboard</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <h1>Math Autoresearch</h1>
+        <div class="sub">Live status · checkpoints · dual evals (held-out test vs train-seed)</div>
+      </div>
+      <div class="controls">
+        <select id="runSelect" title="Select run"></select>
+        <button id="refreshBtn" type="button">Refresh</button>
+        <button id="autoBtn" class="primary" type="button">Auto: ON</button>
+        <span id="livePill" class="live-pill offline"><span class="dot"></span><span id="liveText">connecting…</span></span>
+      </div>
+    </header>
+
+    <section class="grid kpis" id="kpiRow">
+      <!-- filled by JS -->
+    </section>
+
+    <section class="grid main">
+      <div class="card">
+        <div class="title-row">
+          <h2>Accuracy over iterations</h2>
+          <span class="hint" id="chartHint">Post-train instant accuracy</span>
+        </div>
+        <div class="chart-wrap"><canvas id="accChart"></canvas></div>
+        <div class="legend">
+          <span><i class="swatch" style="background:var(--train)"></i> Train-seed instant (post)</span>
+          <span><i class="swatch" style="background:var(--heldout)"></i> Held-out test instant (post)</span>
+          <span><i class="swatch" style="background:var(--high)"></i> Train-seed high (post)</span>
+          <span><i class="swatch" style="background:#fbbf24"></i> Held-out high (post)</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="title-row">
+          <h2>Checkpoints</h2>
+          <span class="hint">Finalized vs last intermediate</span>
+        </div>
+        <div class="ckpt-stack" id="ckptStack">
+          <div class="empty">No checkpoints yet</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid split2 section-gap">
+      <div class="card">
+        <div class="title-row">
+          <h2>Dual evaluation</h2>
+          <span class="hint">Latest post-train snapshot</span>
+        </div>
+        <p class="hint" id="evalLegend"></p>
+        <div class="eval-cols" id="evalCols">
+          <div class="empty">Waiting for evals…</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="title-row">
+          <h2>Overfit gap &amp; data growth</h2>
+          <span class="hint">train-seed − held-out (instant)</span>
+        </div>
+        <div class="chart-wrap" style="height:200px"><canvas id="gapChart"></canvas></div>
+        <div class="chart-wrap" style="height:160px;margin-top:12px"><canvas id="dataChart"></canvas></div>
+      </div>
+    </section>
+
+    <section class="grid split2 section-gap">
+      <div class="card">
+        <div class="title-row">
+          <h2>Event timeline</h2>
+          <span class="hint">Recent phases</span>
+        </div>
+        <div class="timeline" id="timeline">
+          <div class="empty">No events yet</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="title-row">
+          <h2>Finalized checkpoint table</h2>
+          <span class="hint">Per-iteration last weights</span>
+        </div>
+        <div style="overflow:auto;max-height:320px">
+          <table>
+            <thead>
+              <tr>
+                <th>Iter</th>
+                <th>Name</th>
+                <th>Batch</th>
+                <th>Sampler</th>
+              </tr>
+            </thead>
+            <tbody id="ckptTable">
+              <tr><td colspan="4" class="empty">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="card section-gap">
+      <div class="title-row">
+        <h2>Iteration artifacts</h2>
+        <span class="hint">Generated / validated / evals / train</span>
+      </div>
+      <div style="overflow:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>Iter</th>
+              <th>Generated</th>
+              <th>Validated</th>
+              <th>Eval pre</th>
+              <th>Eval post</th>
+              <th>Train</th>
+              <th>Metrics</th>
+            </tr>
+          </thead>
+          <tbody id="iterTable">
+            <tr><td colspan="7" class="empty">—</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <div id="footerLeft">Polling /api/status every 2s</div>
+      <div id="footerRight">sandmech · loop + dashboard</div>
+    </footer>
+  </div>
+</body>
+</html>
