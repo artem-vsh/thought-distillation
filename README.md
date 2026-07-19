@@ -1,4 +1,6 @@
-# Math autoresearch loop
+Concept in README.pptx
+
+# Autoresearch loop
 
 **Standalone project.** Everything you need lives in this directory (math
 scripts, data, dashboard, git). No parent-folder imports.
