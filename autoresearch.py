@@ -33,6 +33,7 @@ import json
 import os
 import shutil
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -468,7 +469,20 @@ def _run_dual_evals(
     def _cb(snapshot: dict[str, Any]) -> None:
         progress.set_eval_progress(snapshot)
 
-    # Held-out first (primary generalization track)
+    # Held-out first (primary generalization track). When CI is not required
+    # for a split, cap at min_sample_size so we still get a preliminary dual
+    # read without the adaptive growth crawl.
+    heldout_cfg = (
+        eval_ci
+        if eval_ci.require_heldout_ci
+        else replace(eval_ci, max_sample_size=eval_ci.min_sample_size)
+    )
+    train_seed_cfg = (
+        eval_ci
+        if eval_ci.require_train_seed_ci
+        else replace(eval_ci, max_sample_size=eval_ci.min_sample_size)
+    )
+
     heldout_seq = run_sequential_differential(
         pool_csv=eval_heldout_sample,
         out_dir=heldout_dir,
@@ -476,7 +490,7 @@ def _run_dual_evals(
         instant_model_path=sampler_path,
         high_model_path=sampler_path,
         skip_high=skip_high,
-        cfg=eval_ci,
+        cfg=heldout_cfg,
         tag=f"{tag}_heldout",
         prev_instant=_prev_instant_from_metrics(
             prev_heldout_instant, label="prev_heldout_instant"
@@ -504,7 +518,7 @@ def _run_dual_evals(
         instant_model_path=sampler_path,
         high_model_path=sampler_path,
         skip_high=skip_high,
-        cfg=eval_ci,
+        cfg=train_seed_cfg,
         tag=f"{tag}_train_seed",
         prev_instant=_prev_instant_from_metrics(
             prev_train_instant, label="prev_train_seed_instant"
@@ -1209,8 +1223,17 @@ def run_iteration(
         last_overfit_gap=overfit_gap,
     )
 
+    # Chart axis: gen 0 baseline, gen 1 imported parent (if any), then loop iters.
+    run_cfg = load_json(run_dir / "config.json") if (run_dir / "config.json").is_file() else {}
+    imported_parent = bool(
+        run_cfg.get("imported_from")
+        or run_cfg.get("promoted_state_path")
+        or run_cfg.get("imported_checkpoint")
+        or (progress.status.extra or {}).get("promoted")
+    )
     record = {
         "iteration": it,
+        "generation": it + (2 if imported_parent else 1),
         "new_examples": new_examples_added,
         "train_pool_size": progress.status.train_pool_size,
         "heldout_size": progress.status.heldout_size

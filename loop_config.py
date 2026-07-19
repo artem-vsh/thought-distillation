@@ -20,9 +20,9 @@ DEFAULT_CONFIG_PATH = _LOOP_ROOT / "loop_config.toml"
 
 @dataclass(frozen=True)
 class GenerationConfig:
-    step_size: int = 200
+    step_size: int = 400
     seed_samples: int = 40
-    variations_per_batch: int = 5
+    variations_per_batch: int = 8
     seeds_per_batch: int = 8
     temperature: float = 0.8
 
@@ -41,13 +41,13 @@ class EvalCIConfig:
     p_value: float = 0.05
     batch_size: int = 40
     min_sample_size: int = 40
-    max_sample_size: int = 500
+    max_sample_size: int = 200
     compare_instant_vs_high: bool = True
     compare_instant_vs_previous: bool = True
     require_heldout_ci: bool = True
     require_train_seed_ci: bool = False
-    pool_size_heldout: int = 500
-    pool_size_train_seed: int = 500
+    pool_size_heldout: int = 200
+    pool_size_train_seed: int = 200
 
     @property
     def target_half_width(self) -> float:

@@ -127,25 +127,24 @@ def load_math_problems(input_csv: Path) -> list[MathProblem]:
 
 def make_judge_messages(
     operation: str,
-    solution: str,
     policy_response: str,
 ) -> list[dict[str, str]]:
     """Build the user message for the LLM judge.
 
-    The judge sees the same policy prompt used by ``ask_arithmetic``, the
-    reference solution from the data file, and the policy's free-form answer.
+    The judge must decide correctness on its own from the problem and the
+    model's answer. No reference solution is provided.
     """
     problem_prompt = make_prompt(operation)
     content = "\n".join(
         [
             "You are grading a model's answer to an arithmetic problem.",
-            "Decide whether the model's answer is numerically equivalent to the reference solution.",
+            "Solve the problem yourself, then decide whether the model's answer is correct.",
+            "You are not given a reference answer — verify the result independently.",
             "Ignore minor formatting differences (whitespace, trailing zeros, signs like +42).",
             "If the model output contains reasoning, grade only the final numeric result.",
             "",
             f"Problem prompt: {problem_prompt}",
             f"Expression: {operation}",
-            f"Reference solution: {solution}",
             f"Model answer: {policy_response}",
             "",
             "Respond with <score>1</score> if the answer is correct, or <score>0</score> if incorrect.",
@@ -277,7 +276,6 @@ class MathLLMJudgeEnv(Env):
 
         judge_messages = make_judge_messages(
             operation=self.problem.operation,
-            solution=self.problem.solution,
             policy_response=content,
         )
         judge_response = await self.judge_llm(judge_messages)

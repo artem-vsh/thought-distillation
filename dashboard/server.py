@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serve the math autoresearch live dashboard.
+"""Serve the Thought Distillation live dashboard.
 
 Example::
 
@@ -359,7 +359,7 @@ def main(argv: list[str] | None = None) -> None:
     server = ThreadingHTTPServer((args.host, args.port), handler)
     url = f"http://{args.host}:{args.port}/"
     print(
-        f"Math autoresearch dashboard\n"
+        f"Thought Distillation dashboard\n"
         f"  URL:       {url}\n"
         f"  Runs root: {state.runs_root}\n"
         f"  Run dir:   {state.default_run_dir or '(latest)'}\n"

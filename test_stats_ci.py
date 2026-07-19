@@ -31,7 +31,7 @@ def test_diff_ci_meets_target() -> None:
 
 def test_load_default_config() -> None:
     cfg = load_loop_config(Path(__file__).resolve().parent / "loop_config.toml")
-    assert cfg.generation.step_size == 200
+    assert cfg.generation.step_size == 400
     assert cfg.eval.target_ci_pp == 2.0
     assert abs(cfg.eval.target_half_width - 0.02) < 1e-12
     assert cfg.eval.p_value == 0.05

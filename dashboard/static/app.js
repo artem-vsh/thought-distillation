@@ -1,4 +1,4 @@
-/* Math autoresearch live dashboard */
+/* Thought Distillation live dashboard */
 
 const $ = (id) => document.getElementById(id);
 
@@ -7,35 +7,53 @@ const state = {
   runId: null,
   timer: null,
   accChart: null,
-  gapChart: null,
-  dataChart: null,
   lastPayload: null,
 };
 
-function pct(x) {
-  if (x == null || Number.isNaN(x)) return "—";
-  return `${(100 * Number(x)).toFixed(1)}%`;
-}
+const COLORS = {
+  instant: "#c084fc",
+  high: "#fbbf24",
+  liveInstant: "#fb923c",
+  liveHigh: "#fdba74",
+};
 
-function num(x, digits = 4) {
-  if (x == null || Number.isNaN(x)) return "—";
-  return Number(x).toFixed(digits);
-}
-
-function deltaHtml(x) {
-  if (x == null || Number.isNaN(x)) return `<span class="delta neu">—</span>`;
-  const n = Number(x);
-  const cls = n > 1e-6 ? "pos" : n < -1e-6 ? "neg" : "neu";
-  const sign = n > 0 ? "+" : "";
-  return `<span class="delta ${cls}">${sign}${(100 * n).toFixed(2)} pp</span>`;
-}
-
-function shortPath(p) {
-  if (!p) return "—";
-  const s = String(p);
-  if (s.length <= 48) return s;
-  return s.slice(0, 18) + "…" + s.slice(-26);
-}
+/** Draw ±CI error bars only for the hovered point(s). */
+const errorBarsOnHover = {
+  id: "errorBarsOnHover",
+  afterDatasetsDraw(chart) {
+    const active = chart.getActiveElements();
+    if (!active.length) return;
+    const { ctx } = chart;
+    const yScale = chart.scales.y;
+    for (const el of active) {
+      const ds = chart.data.datasets[el.datasetIndex];
+      const raw = ds?.data?.[el.index];
+      if (!raw || raw.yMin == null || raw.yMax == null) continue;
+      const meta = chart.getDatasetMeta(el.datasetIndex);
+      const point = meta.data[el.index];
+      if (!point) continue;
+      const x = point.x;
+      const yTop = yScale.getPixelForValue(raw.yMax);
+      const yBot = yScale.getPixelForValue(raw.yMin);
+      const color = typeof ds.borderColor === "string" ? ds.borderColor : COLORS.instant;
+      const cap = 6;
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.75;
+      ctx.lineCap = "round";
+      ctx.globalAlpha = 0.95;
+      ctx.beginPath();
+      ctx.moveTo(x, yTop);
+      ctx.lineTo(x, yBot);
+      ctx.moveTo(x - cap, yTop);
+      ctx.lineTo(x + cap, yTop);
+      ctx.moveTo(x - cap, yBot);
+      ctx.lineTo(x + cap, yBot);
+      ctx.stroke();
+      ctx.restore();
+    }
+  },
+};
 
 function timeAgo(iso) {
   if (!iso) return "";
@@ -46,13 +64,6 @@ function timeAgo(iso) {
   if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
   if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
   return iso.slice(0, 19).replace("T", " ") + "Z";
-}
-
-function phaseClass(phase) {
-  if (!phase) return "";
-  if (phase === "stopped" || phase === "completed") return "stopped";
-  if (String(phase).includes("train")) return "train";
-  return "";
 }
 
 async function fetchJSON(url) {
@@ -68,229 +79,15 @@ function setLive(ok, text) {
   label.textContent = text;
 }
 
-function renderKpis(snap) {
-  const h = snap.headline || {};
-  const ck = snap.checkpoints || {};
-  const lastFin = ck.last_finalized;
-  const lastInt = ck.last_intermediate;
-
-  const items = [
-    {
-      label: "Phase",
-      value: `<span class="phase-badge ${phaseClass(h.phase)}${h.eval_in_progress ? " train" : ""}">${
-        h.eval_in_progress ? "eval…" : escapeHtml(h.phase || "—")
-      }</span>`,
-      delta: h.message
-        ? `<span class="delta neu" title="${escapeHtml(h.message)}">${escapeHtml(h.message).slice(0, 100)}</span>`
-        : "",
-    },
-    {
-      label: "Iteration",
-      value: h.iteration != null ? String(h.iteration) : "—",
-      delta: h.stopped
-        ? `<span class="delta neg">${escapeHtml(h.stop_reason || "stopped")}</span>`
-        : `<span class="delta neu">${h.eval_in_progress ? "eval running" : "running"}</span>`,
-    },
-    {
-      label: "Held-out instant / high",
-      value: `${pct(h.heldout_instant)} / ${pct(h.heldout_high)}`,
-      delta: deltaHtml(h.last_heldout_instant_delta),
-    },
-    {
-      label: "Train-seed instant / high",
-      value: `${pct(h.train_seed_instant)} / ${pct(h.train_seed_high)}`,
-      delta: deltaHtml(h.last_instant_delta),
-    },
-    {
-      label: "Overfit gap",
-      value: h.overfit_gap == null ? "—" : `${(100 * h.overfit_gap).toFixed(1)} pp`,
-      delta: `<span class="delta neu">train − heldout</span>`,
-    },
-    {
-      label: "Train pool",
-      value: h.train_pool_size != null ? String(h.train_pool_size) : "—",
-      delta: `<span class="delta neu">heldout ${h.heldout_size ?? "—"}</span>`,
-    },
-    {
-      label: "Finalized ckpts",
-      value: String(ck.count_finalized ?? 0),
-      delta: lastFin
-        ? `<span class="delta neu">last ${escapeHtml(String(lastFin.name ?? lastFin.iteration ?? ""))}</span>`
-        : "",
-    },
-    {
-      label: "Last intermediate",
-      value: lastInt?.name != null ? String(lastInt.name) : "—",
-      delta: lastInt?.batch != null
-        ? `<span class="delta neu">batch ${escapeHtml(String(lastInt.batch))}</span>`
-        : `<span class="delta neu">${ck.count_intermediate ?? 0} mid</span>`,
-    },
-    {
-      label: "Target CI",
-      value:
-        h.target_ci_pp != null
-          ? `±${Number(h.target_ci_pp).toFixed(1)} pp`
-          : "—",
-      delta: `<span class="delta neu">p&lt;${h.p_value ?? "0.05"}</span>`,
-    },
-    {
-      label: "Baseline heldout instant",
-      value: pct(h.baseline_heldout_instant),
-      delta:
-        h.baseline_heldout_high != null
-          ? `<span class="delta neu">high ${pct(h.baseline_heldout_high)}</span>`
-          : `<span class="delta neu">parent base model</span>`,
-    },
-  ];
-
-  $("kpiRow").innerHTML = items
-    .map(
-      (it) => `
-    <div class="card kpi">
-      <div class="value">${it.value}</div>
-      <div class="label">${it.label}</div>
-      ${it.delta || ""}
-    </div>`
-    )
-    .join("");
-}
-
-function escapeHtml(s) {
-  return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
-function renderCheckpoints(snap) {
-  const ck = snap.checkpoints || {};
-  const fin = ck.last_finalized;
-  const mid = ck.last_intermediate;
-  const parts = [];
-
-  const card = (role, rec, cls) => {
-    if (!rec) {
-      return `<div class="ckpt ${cls}"><div class="role">${role}</div><div class="empty">None yet</div></div>`;
-    }
-    return `
-      <div class="ckpt ${cls}">
-        <div class="role">${role}</div>
-        <div class="name">${escapeHtml(String(rec.name ?? `iter ${rec.iteration ?? "?"}`))}</div>
-        <span class="tag">${cls === "finalized" ? "finalized" : "intermediate"}</span>
-        <div class="meta">
-          <div>iter ${escapeHtml(String(rec.iteration ?? "—"))}${rec.batch != null ? ` · batch ${escapeHtml(String(rec.batch))}` : ""}</div>
-          <div title="${escapeHtml(rec.sampler_path || "")}">sampler: ${escapeHtml(shortPath(rec.sampler_path))}</div>
-          <div title="${escapeHtml(rec.state_path || "")}">state: ${escapeHtml(shortPath(rec.state_path))}</div>
-        </div>
-      </div>`;
-  };
-
-  parts.push(card("Finalized checkpoint (last complete)", fin, "finalized"));
-  parts.push(card("Last intermediate checkpoint", mid, "intermediate"));
-
-  const policy = snap.state?.last_policy_sampler_path;
-  const judge = snap.state?.last_judge_model_path;
-  if (policy || judge) {
-    parts.push(`
-      <div class="ckpt">
-        <div class="role">Active model pointers</div>
-        <div class="meta">
-          <div title="${escapeHtml(policy || "")}">policy sampler: ${escapeHtml(shortPath(policy))}</div>
-          <div title="${escapeHtml(judge || "")}">judge path: ${escapeHtml(shortPath(judge))}</div>
-          <div>policy source: ${escapeHtml(snap.headline?.policy_source || "—")} · judge: ${escapeHtml(snap.headline?.judge_source || "—")}</div>
-        </div>
-      </div>`);
-  }
-
-  $("ckptStack").innerHTML = parts.join("");
-
-  const rows = (ck.finalized || []).slice().reverse();
-  $("ckptTable").innerHTML = rows.length
-    ? rows
-        .map(
-          (r) => `
-      <tr>
-        <td>${escapeHtml(String(r.iteration ?? "—"))}</td>
-        <td>${escapeHtml(String(r.name ?? "—"))}</td>
-        <td>${escapeHtml(String(r.batch ?? "—"))}</td>
-        <td class="mono" title="${escapeHtml(r.sampler_path || "")}">${escapeHtml(shortPath(r.sampler_path))}</td>
-      </tr>`
-        )
-        .join("")
-    : `<tr><td colspan="4" class="empty">No finalized checkpoints</td></tr>`;
-}
-
-function renderEvals(snap) {
-  const legend = snap.evals?.legend || {};
-  const bl = snap.baseline || {};
-  $("evalLegend").textContent =
-    (legend.train_seed || "") +
-    " · " +
-    (legend.heldout || "") +
-    (bl.heldout_instant != null
-      ? ` · baseline heldout instant ${pct(bl.heldout_instant)} / high ${pct(bl.heldout_high)}`
-      : "");
-
-  const latest = snap.evals?.latest || {};
-  const train = latest.train_seed || {};
-  const held = latest.heldout || {};
-  const postT = train.post || {};
-  const postH = held.post || {};
-  const preT = train.pre || {};
-  const preH = held.pre || {};
-
-  const vsBaseline = (cur, base) => {
-    if (cur == null || base == null || Number.isNaN(cur) || Number.isNaN(base))
-      return "";
-    const d = cur - base;
-    const cls = d > 1e-6 ? "pos" : d < -1e-6 ? "neg" : "neu";
-    const sign = d > 0 ? "+" : "";
-    return `<div class="metric-row"><span class="k">vs baseline</span><span class="v ${cls}">${sign}${(100 * d).toFixed(1)} pp</span></div>`;
-  };
-
-  const panel = (cls, title, desc, post, pre, delta, baseInstant, baseHigh) => `
-    <div class="eval-panel ${cls}">
-      <h3>${title}</h3>
-      <div class="desc">${escapeHtml(desc)}</div>
-      <div class="metric-row"><span class="k">Instant (post)</span><span class="v ${cls}">${pct(post.instant)}</span></div>
-      ${vsBaseline(post.instant, baseInstant)}
-      <div class="metric-row"><span class="k">High (post)</span><span class="v high">${pct(post.high)}</span></div>
-      ${vsBaseline(post.high, baseHigh)}
-      <div class="metric-row"><span class="k">Baseline instant / high</span><span class="v">${pct(baseInstant)} / ${pct(baseHigh)}</span></div>
-      <div class="metric-row"><span class="k">Instant−High gap</span><span class="v">${post.gap == null || Number.isNaN(post.gap) ? "—" : num(post.gap)}</span></div>
-      <div class="metric-row"><span class="k">Instant (pre)</span><span class="v">${pct(pre.instant)}</span></div>
-      <div class="metric-row"><span class="k">Δ instant (pre→post)</span><span class="v">${delta == null ? "—" : ((100 * delta) >= 0 ? "+" : "") + (100 * delta).toFixed(2) + " pp"}</span></div>
-      <div class="metric-row"><span class="k">Correct / completed</span><span class="v">${post.instant_correct ?? "—"} / ${post.instant_completed ?? "—"}</span></div>
-    </div>`;
-
-  $("evalCols").innerHTML =
-    panel(
-      "train",
-      "Train-seed / run-generated track",
-      legend.train_seed || "In-domain sample from train split",
-      postT,
-      preT,
-      train.delta_instant,
-      bl.train_seed_instant,
-      bl.train_seed_high
-    ) +
-    panel(
-      "heldout",
-      "Held-out original test",
-      legend.heldout || "Never-train test set",
-      postH,
-      preH,
-      held.delta_instant,
-      bl.heldout_instant,
-      bl.heldout_high
-    );
-}
-
 function chartDefaults() {
   Chart.defaults.color = "#8b9bb8";
   Chart.defaults.borderColor = "rgba(148,163,184,0.12)";
   Chart.defaults.font.family = "Segoe UI, system-ui, sans-serif";
+}
+
+function pctLabel(y) {
+  if (y == null || Number.isNaN(y)) return "—";
+  return `${(100 * Number(y)).toFixed(1)}%`;
 }
 
 function ensureCharts() {
@@ -300,6 +97,7 @@ function ensureCharts() {
     state.accChart = new Chart($("accChart"), {
       type: "line",
       data: { datasets: [] },
+      plugins: [errorBarsOnHover],
       options: {
         responsive: true,
         maintainAspectRatio: false,
@@ -313,6 +111,20 @@ function ensureCharts() {
                 if (x === 0) return "Generation 0 · baseline";
                 if (x == null) return "";
                 return `Generation ${x}`;
+              },
+              label: (ctx) => {
+                const raw = ctx.raw || {};
+                const name = ctx.dataset.label || "";
+                const base = `${name}: ${pctLabel(raw.y ?? ctx.parsed.y)}`;
+                if (raw.ciHalf != null && !Number.isNaN(raw.ciHalf)) {
+                  return `${base}  ±${(100 * raw.ciHalf).toFixed(1)} pp`;
+                }
+                return base;
+              },
+              afterLabel: (ctx) => {
+                const raw = ctx.raw || {};
+                if (raw.yMin == null || raw.yMax == null) return "";
+                return `CI [${pctLabel(raw.yMin)}, ${pctLabel(raw.yMax)}]`;
               },
             },
           },
@@ -342,208 +154,154 @@ function ensureCharts() {
       },
     });
   }
-  if (!state.gapChart) {
-    state.gapChart = new Chart($("gapChart"), {
-      type: "bar",
-      data: { labels: [], datasets: [] },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: {
-          y: {
-            ticks: { callback: (v) => `${(100 * v).toFixed(0)}pp` },
-            grid: { color: "rgba(148,163,184,0.08)" },
-          },
-          x: { grid: { display: false } },
-        },
-      },
-    });
-  }
-  if (!state.dataChart) {
-    state.dataChart = new Chart($("dataChart"), {
-      type: "line",
-      data: { labels: [], datasets: [] },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: {
-          y: {
-            beginAtZero: true,
-            title: { display: true, text: "Train pool size", font: { size: 10 } },
-            grid: { color: "rgba(148,163,184,0.08)" },
-          },
-          x: { grid: { display: false } },
-        },
-      },
-    });
-  }
 }
 
-function updateCharts(snap) {
-  if (typeof Chart === "undefined") return;
-  ensureCharts();
-  const chart = snap.evals?.series?.chart || {};
-  const points = chart.points || [];
-  const live = chart.live || snap.in_progress || null;
+/** Points with optional CI half-width → {x, y, yMin, yMax, ciHalf}. */
+function xyWithCi(arr, key, halfKey) {
+  return arr
+    .filter((p) => p[key] != null && !Number.isNaN(p[key]))
+    .map((p) => {
+      const y = Number(p[key]);
+      const half = p[halfKey];
+      const pt = { x: p.generation, y };
+      if (half != null && !Number.isNaN(Number(half))) {
+        const h = Number(half);
+        pt.ciHalf = h;
+        pt.yMin = Math.max(0, y - h);
+        pt.yMax = Math.min(1, y + h);
+      }
+      return pt;
+    });
+}
 
-  const seriesLine = (label, data, color, opts = {}) => ({
+function seriesLine(label, data, color, opts = {}) {
+  return {
     label,
     data,
     borderColor: color,
     backgroundColor: color + "33",
     tension: 0.2,
     borderWidth: opts.borderWidth ?? 2.4,
-    pointRadius: opts.pointRadius ?? 4,
-    pointHoverRadius: 6,
+    pointRadius: opts.pointRadius ?? 5,
+    pointHoverRadius: 8,
     pointStyle: opts.pointStyle || "circle",
     spanGaps: true,
     borderDash: opts.borderDash || [],
     showLine: opts.showLine !== false,
     order: opts.order ?? 10,
     parsing: false,
-  });
+  };
+}
 
-  // Split baseline (gen 0) vs run (gen ≥ 1) so styles never mix
-  const runPts = points.filter((p) => p.kind !== "baseline");
-  const basePts = points.filter((p) => p.kind === "baseline");
-  const xyFrom = (arr, key) =>
-    arr
-      .filter((p) => p[key] != null && !Number.isNaN(p[key]))
-      .map((p) => ({ x: p.generation, y: p[key] }));
-  const bandFrom = (arr, key, halfKey, sign) =>
-    arr
-      .filter(
-        (p) =>
-          p[key] != null &&
-          p[halfKey] != null &&
-          !Number.isNaN(p[key]) &&
-          !Number.isNaN(p[halfKey])
-      )
-      .map((p) => ({
-        x: p.generation,
-        y: Math.max(0, Math.min(1, p[key] + sign * p[halfKey])),
-      }));
+/**
+ * Merge live eval into the generation timeline so each gen has at most
+ * two values (instant + high). Never plot a separate live overlay on top
+ * of an existing gen — that was causing four dots at one x.
+ */
+function mergeLiveIntoPoints(points, live) {
+  const merged = points.map((p) => ({ ...p }));
+  // Interim history gens are incomplete — style them as live even without overlay.
+  const interimGens = new Set(
+    merged.filter((p) => p.kind === "interim" || p.ci_refine_pending).map((p) => Number(p.generation))
+  );
 
-  const datasets = [
-    // Baseline gen 0 — gray, large points, no connecting line into run
-    seriesLine("Baseline held-out instant", xyFrom(basePts, "heldout_instant"), "#94a3b8", {
-      pointRadius: 8,
-      borderWidth: 2,
-      showLine: false,
-      order: 5,
-    }),
-    seriesLine("Baseline held-out high", xyFrom(basePts, "heldout_high"), "#64748b", {
-      pointRadius: 7,
-      borderWidth: 2,
-      showLine: false,
-      order: 5,
-    }),
-    seriesLine("Baseline train-seed instant", xyFrom(basePts, "train_seed_instant"), "#94a3b888", {
-      pointRadius: 6,
-      showLine: false,
-      order: 5,
-    }),
-    // Finalized run generations
-    seriesLine("Held-out instant", xyFrom(runPts, "heldout_instant"), "#c084fc", {
-      pointRadius: 5,
-    }),
-    seriesLine("Held-out high", xyFrom(runPts, "heldout_high"), "#fbbf24", {
-      borderDash: [5, 4],
-      pointRadius: 4,
-    }),
-    seriesLine("Train-seed instant", xyFrom(runPts, "train_seed_instant"), "#38bdf8"),
-    seriesLine("Train-seed high", xyFrom(runPts, "train_seed_high"), "#f472b6", {
-      borderDash: [5, 4],
-    }),
-    seriesLine(
-      "Held-out instant CI+",
-      bandFrom(points, "heldout_instant", "heldout_instant_ci_half", +1),
-      "#c084fc55",
-      { pointRadius: 0, borderWidth: 1, borderDash: [2, 2], order: 20 }
-    ),
-    seriesLine(
-      "Held-out instant CI-",
-      bandFrom(points, "heldout_instant", "heldout_instant_ci_half", -1),
-      "#c084fc55",
-      { pointRadius: 0, borderWidth: 1, borderDash: [2, 2], order: 20 }
-    ),
-  ];
-
-  // Live generation: separate series, diamond markers, not merged into solid history lines
-  if (live && live.generation != null) {
-    const gx = live.generation;
-    const livePt = (y) =>
-      y == null || Number.isNaN(y) ? [] : [{ x: gx, y }];
-    if (live.heldout_instant != null) {
-      datasets.push(
-        seriesLine("Live held-out instant", livePt(live.heldout_instant), "#fb923c", {
-          pointStyle: "rectRot",
-          pointRadius: 9,
-          borderWidth: 2.5,
-          showLine: false,
-          order: 1,
-        })
-      );
-      if (live.heldout_instant_ci_half != null) {
-        const hi = Math.min(1, live.heldout_instant + live.heldout_instant_ci_half);
-        const lo = Math.max(0, live.heldout_instant - live.heldout_instant_ci_half);
-        datasets.push(
-          seriesLine("Live CI+", livePt(hi), "#fb923c88", {
-            pointRadius: 0,
-            borderWidth: 1.5,
-            borderDash: [2, 3],
-            showLine: false,
-            order: 2,
-          }),
-          seriesLine("Live CI-", livePt(lo), "#fb923c88", {
-            pointRadius: 0,
-            borderWidth: 1.5,
-            borderDash: [2, 3],
-            showLine: false,
-            order: 2,
-          })
-        );
-      }
-    }
-    if (live.heldout_high != null) {
-      datasets.push(
-        seriesLine("Live held-out high", livePt(live.heldout_high), "#fdba74", {
-          pointStyle: "triangle",
-          pointRadius: 8,
-          showLine: false,
-          order: 1,
-        })
-      );
-    }
-    if (live.train_seed_instant != null) {
-      datasets.push(
-        seriesLine("Live train-seed instant", livePt(live.train_seed_instant), "#38bdf8", {
-          pointStyle: "rectRot",
-          pointRadius: 7,
-          showLine: false,
-          order: 1,
-        })
-      );
-    }
-    if ((live.kinds || []).includes("checkpoint") && live.checkpoint_y != null) {
-      datasets.push(
-        seriesLine("Live checkpoint", livePt(live.checkpoint_y), "#facc15", {
-          pointStyle: "circle",
-          pointRadius: 10,
-          borderWidth: 3,
-          showLine: false,
-          order: 0,
-        })
-      );
+  if (!live || live.generation == null) {
+    const only = interimGens.size ? [...interimGens][interimGens.size - 1] : null;
+    return { points: merged, liveGen: only };
+  }
+  const gx = Number(live.generation);
+  const idx = merged.findIndex((p) => Number(p.generation) === gx);
+  const overlay = {
+    generation: gx,
+    kind: "live",
+    label: live.label || `gen ${gx} · live`,
+    heldout_instant: live.heldout_instant,
+    heldout_high: live.heldout_high,
+    heldout_instant_ci_half: live.heldout_instant_ci_half,
+    heldout_high_ci_half: live.heldout_high_ci_half,
+  };
+  if (idx >= 0) {
+    const prev = merged[idx];
+    merged[idx] = {
+      ...prev,
+      kind: prev.kind === "interim" ? "interim" : "live",
+      label: overlay.label,
+      // Prefer live/refine metrics when present (updates interim in place).
+      heldout_instant:
+        overlay.heldout_instant != null ? overlay.heldout_instant : prev.heldout_instant,
+      heldout_high:
+        overlay.heldout_high != null ? overlay.heldout_high : prev.heldout_high,
+      heldout_instant_ci_half:
+        overlay.heldout_instant_ci_half != null
+          ? overlay.heldout_instant_ci_half
+          : prev.heldout_instant_ci_half,
+      heldout_high_ci_half:
+        overlay.heldout_high_ci_half != null
+          ? overlay.heldout_high_ci_half
+          : prev.heldout_high_ci_half,
+    };
+  } else {
+    // Only add a new x-slot when live has its own metrics (not empty marker).
+    if (overlay.heldout_instant != null || overlay.heldout_high != null) {
+      merged.push(overlay);
     }
   }
+  interimGens.add(gx);
+  return { points: merged, liveGen: gx, interimGens };
+}
+
+function seriesWithLiveStyle(label, data, color, liveGen, interimGens, opts = {}) {
+  const ds = seriesLine(label, data, color, opts);
+  const isHot = (x) =>
+    (liveGen != null && Number(x) === Number(liveGen)) ||
+    (interimGens && interimGens.has(Number(x)));
+  // Per-point diamond for interim / live gens (still only two series total).
+  ds.pointStyle = data.map((p) => (isHot(p.x) ? "rectRot" : "circle"));
+  ds.pointRadius = data.map((p) => (isHot(p.x) ? 9 : opts.pointRadius ?? 6));
+  ds.pointHoverRadius = data.map((p) => (isHot(p.x) ? 11 : 8));
+  ds.pointBackgroundColor = data.map((p) =>
+    isHot(p.x)
+      ? label.toLowerCase().includes("high")
+        ? COLORS.liveHigh
+        : COLORS.liveInstant
+      : color
+  );
+  ds.pointBorderColor = ds.pointBackgroundColor;
+  return ds;
+}
+
+function updateCharts(snap) {
+  if (typeof Chart === "undefined") return;
+  ensureCharts();
+  const chart = snap.evals?.series?.chart || {};
+  const live = chart.live || snap.in_progress || null;
+  const { points, liveGen, interimGens } = mergeLiveIntoPoints(chart.points || [], live);
+  const hotGens = interimGens || new Set(liveGen != null ? [liveGen] : []);
+
+  // Exactly two series: held-out instant + high. Interim/live restyled in-place.
+  const datasets = [
+    seriesWithLiveStyle(
+      "Instant",
+      xyWithCi(points, "heldout_instant", "heldout_instant_ci_half"),
+      COLORS.instant,
+      liveGen,
+      hotGens,
+      { pointRadius: 6 }
+    ),
+    seriesWithLiveStyle(
+      "High reasoning",
+      xyWithCi(points, "heldout_high", "heldout_high_ci_half"),
+      COLORS.high,
+      liveGen,
+      hotGens,
+      { pointRadius: 6, borderDash: [5, 4] }
+    ),
+  ];
 
   const xMax = Math.max(
     chart.x_suggested_max ?? 2,
     chart.x_max ?? 0,
-    live?.generation ?? 0,
+    liveGen ?? 0,
     2
   );
   state.accChart.options.scales.x.min = 0;
@@ -554,86 +312,14 @@ function updateCharts(snap) {
 
   const hint = $("chartHint");
   if (hint) {
-    const nFinal = points.filter((p) => p.kind === "finalized").length;
-    const parts = [`gen 0 = baseline`];
+    const nFinal = points.filter((p) => p.kind === "finalized" || p.kind === "imported").length;
+    const nInterim = points.filter((p) => p.kind === "interim").length;
+    const parts = ["instant + high · hover for ±CI"];
     if (nFinal) parts.push(`${nFinal} finalized`);
+    if (nInterim) parts.push(`${nInterim} interim`);
     if (live) parts.push(live.label || "live");
     hint.textContent = parts.join(" · ");
   }
-
-  // Gap chart: one bar per generation (skip empty)
-  const gapPts = points.filter((p) => p.overfit_gap != null);
-  state.gapChart.data.labels = gapPts.map((p) => String(p.generation));
-  state.gapChart.data.datasets = [
-    {
-      label: "Overfit gap",
-      data: gapPts.map((p) => p.overfit_gap),
-      backgroundColor: gapPts.map((v) =>
-        v.overfit_gap > 0 ? "rgba(248,113,113,0.65)" : "rgba(52,211,153,0.65)"
-      ),
-      borderRadius: 6,
-    },
-  ];
-  state.gapChart.update("none");
-
-  const growth = snap.data_growth || [];
-  state.dataChart.data.labels = growth.map(
-    (g, i) => (g.iteration != null ? `i${g.iteration}` : `#${i}`)
-  );
-  state.dataChart.data.datasets = [
-    {
-      label: "Train pool",
-      data: growth.map((g) => g.size),
-      borderColor: "#34d399",
-      backgroundColor: "rgba(52,211,153,0.15)",
-      fill: true,
-      tension: 0.3,
-      pointRadius: 2,
-      borderWidth: 2,
-    },
-  ];
-  state.dataChart.update("none");
-}
-
-function renderTimeline(snap) {
-  const events = (snap.events || []).slice().reverse();
-  if (!events.length) {
-    $("timeline").innerHTML = `<div class="empty">No events yet — start an autoresearch run</div>`;
-    return;
-  }
-  $("timeline").innerHTML = events
-    .map((e) => {
-      const ts = e.ts ? e.ts.slice(11, 19) : "—";
-      return `
-      <div class="event">
-        <div class="ts">${escapeHtml(ts)}</div>
-        <div class="body">
-          <div class="kind">${escapeHtml(e.kind || "event")}${e.iteration != null ? ` · iter ${e.iteration}` : ""}</div>
-          <div class="msg">${escapeHtml(e.message || e.phase || "")}</div>
-        </div>
-      </div>`;
-    })
-    .join("");
-}
-
-function renderIters(snap) {
-  const iters = snap.iterations || [];
-  $("iterTable").innerHTML = iters.length
-    ? iters
-        .map(
-          (it) => `
-      <tr>
-        <td>${escapeHtml(it.name)}</td>
-        <td>${it.n_generated ?? "—"}</td>
-        <td>${it.n_validated ?? "—"}</td>
-        <td>${it.has_eval_pre ? "✓" : "—"}</td>
-        <td>${it.has_eval_post ? "✓" : "—"}</td>
-        <td>${it.has_train ? "✓" : "—"}</td>
-        <td>${it.has_metrics ? "✓" : "—"}</td>
-      </tr>`
-        )
-        .join("")
-    : `<tr><td colspan="7" class="empty">No iterations yet</td></tr>`;
 }
 
 function fillRunSelect(runs, currentId) {
@@ -660,18 +346,6 @@ function fillRunSelect(runs, currentId) {
   state.runId = sel.value || null;
 }
 
-function renderEmpty(error) {
-  $("kpiRow").innerHTML = `
-    <div class="card kpi" style="grid-column: 1 / -1">
-      <div class="value" style="font-size:1.2rem">No active run</div>
-      <div class="label">${escapeHtml(error || "Start python -m autoresearch")}</div>
-      <div class="delta neu">Watching output/autoresearch/</div>
-    </div>`;
-  $("ckptStack").innerHTML = `<div class="empty">Checkpoints appear after the first train step</div>`;
-  $("evalCols").innerHTML = `<div class="empty">Dual evals (train-seed + held-out) appear after the first eval phase</div>`;
-  $("timeline").innerHTML = `<div class="empty">Waiting for events.jsonl</div>`;
-}
-
 async function refresh() {
   try {
     const q = state.runId ? `?run=${encodeURIComponent(state.runId)}` : "";
@@ -681,17 +355,17 @@ async function refresh() {
 
     if (!snap.ok) {
       setLive(true, "no run");
-      renderEmpty(snap.error);
+      if (state.accChart) {
+        state.accChart.data.datasets = [];
+        state.accChart.update("none");
+      }
+      const hint = $("chartHint");
+      if (hint) hint.textContent = snap.error || "No active run — start python -m autoresearch";
       $("footerLeft").textContent = `Updated ${new Date().toLocaleTimeString()} · ${snap.error || "no run"}`;
       return;
     }
 
     setLive(true, `live · ${timeAgo(snap.headline?.updated_at || snap.generated_at)}`);
-    renderKpis(snap);
-    renderCheckpoints(snap);
-    renderEvals(snap);
-    renderTimeline(snap);
-    renderIters(snap);
     updateCharts(snap);
 
     $("footerLeft").textContent =
@@ -722,7 +396,6 @@ function init() {
     state.runId = $("runSelect").value || null;
     refresh();
   });
-  // Wait for Chart.js if loaded with defer
   const start = () => {
     ensureCharts();
     refresh();

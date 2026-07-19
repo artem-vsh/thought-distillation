@@ -45,15 +45,18 @@ def test_extract_judge_score_empty() -> None:
     assert extract_judge_score("no clear decision") == 0.0
 
 
-def test_make_judge_messages_includes_prompt_and_solution() -> None:
-    messages = make_judge_messages("2+2", "4", "4")
+def test_make_judge_messages_has_no_reference_solution() -> None:
+    messages = make_judge_messages("2+2", "4")
     assert len(messages) == 1
     assert messages[0]["role"] == "user"
     content = messages[0]["content"]
     assert make_prompt("2+2") in content
-    assert "Reference solution: 4" in content
+    assert "Expression: 2+2" in content
     assert "Model answer: 4" in content
+    assert "Reference solution" not in content
+    assert "reference" not in content.lower()
     assert "<score>" in content
+    assert "independently" in content
 
 
 def test_load_math_problems(tmp_path: Path) -> None:

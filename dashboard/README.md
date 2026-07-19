@@ -1,4 +1,4 @@
-# Math autoresearch dashboard
+# Thought Distillation dashboard
 
 Live UI for `output/autoresearch/<run>/` artifacts.
 

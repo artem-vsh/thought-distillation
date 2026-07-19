@@ -23,7 +23,7 @@ python -m dashboard --open
 
 | Key | Meaning | Default |
 |-----|---------|---------|
-| `generation.step_size` | New data rows to generate each iter | `200` |
+| `generation.step_size` | New data rows to generate each iter | `400` |
 | `eval.target_ci_pp` | Adaptive-eval CI half-width (percentage points) | `2.0` |
 | `eval.p_value` | α for that CI (p&lt;0.05 → 95% CI) | `0.05` |
 | `eval.batch_size` | First chunk / growth step for eval n | `40` |

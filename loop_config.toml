@@ -2,13 +2,12 @@
 # Load path: loop_config.toml next to autoresearch.py, or LOOP_CONFIG env.
 
 [generation]
-# How many new unique validated-ish examples to aim for each iteration
-# (passed as gen_target / "step size").
-step_size = 200
+# How many new training rows to aim for each iteration (gen_target / step size).
+step_size = 400
 
 # Few-shot / batch knobs for the high-reasoning generator
 seed_samples = 40
-variations_per_batch = 5
+variations_per_batch = 8
 seeds_per_batch = 8
 temperature = 0.8
 
@@ -21,9 +20,10 @@ target_ci_pp = 2.0
 p_value = 0.05
 
 # Growing sample schedule
+# (use smaller max for faster preliminary checkpoints; raise for final reports)
 batch_size = 40          # first chunk and each expansion step
 min_sample_size = 40     # never finish with fewer (unless pool is smaller)
-max_sample_size = 500    # hard cap even if CI still wide
+max_sample_size = 200    # hard cap even if CI still wide
 
 # Which differences must be precise enough before stopping growth
 compare_instant_vs_high = true
@@ -34,8 +34,8 @@ require_heldout_ci = true
 require_train_seed_ci = false
 
 # Fixed pools carved at run start (upper bound for adaptive growth)
-pool_size_heldout = 500
-pool_size_train_seed = 500
+pool_size_heldout = 200
+pool_size_train_seed = 200
 
 [train]
 max_steps = 20

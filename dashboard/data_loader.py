@@ -144,6 +144,207 @@ def _nested_high_acc(diff: Any) -> float | None:
     return None
 
 
+def _is_imported_history_record(rec: dict[str, Any]) -> bool:
+    """True for the imported parent-checkpoint generation (gen 1)."""
+    kind = str(rec.get("kind") or "")
+    if kind in {
+        "imported",
+        "imported_checkpoint",
+        "parent_import",
+        "parent_checkpoint",
+    }:
+        return True
+    if rec.get("source") in {"parent_train_promoted", "imported_checkpoint"}:
+        return True
+    try:
+        if int(rec.get("iteration")) == -1:  # type: ignore[arg-type]
+            return True
+    except (TypeError, ValueError):
+        pass
+    return False
+
+
+def _history_has_imported_slot(history: list[dict[str, Any]]) -> bool:
+    return any(
+        isinstance(r, dict) and _is_imported_history_record(r) for r in history
+    )
+
+
+def _history_record_generation(
+    rec: dict[str, Any],
+    *,
+    has_imported_slot: bool,
+) -> int:
+    """Map a history record onto the chart generation axis.
+
+    Convention when a parent checkpoint was imported:
+      gen 0 = baseline, gen 1 = imported, gen (loop_iter + 2) = loop train k
+    Without import:
+      gen 0 = baseline, gen (loop_iter + 1) = loop train k
+    Explicit ``generation`` on the record always wins.
+    """
+    if rec.get("generation") is not None:
+        try:
+            return int(rec["generation"])
+        except (TypeError, ValueError):
+            pass
+    if _is_imported_history_record(rec):
+        return 1
+    try:
+        loop_it = int(rec.get("iteration"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 1
+    return loop_it + (2 if has_imported_slot else 1)
+
+
+def _is_interim_history_record(rec: dict[str, Any]) -> bool:
+    """True when post-eval was early-finalized so later gens can start.
+
+    These points still belong on their own generation axis slot; CI refine
+    continues in the background and must update *that* gen, never the next one.
+    """
+    if rec.get("ci_refine_pending") is True:
+        return True
+    post = None
+    heldout = rec.get("heldout")
+    if isinstance(heldout, dict):
+        post = heldout.get("post")
+    if post is None:
+        post = rec.get("post_heldout") or rec.get("post")
+    if isinstance(post, dict) and post.get("role") in {
+        "post_interim",
+        "interim",
+        "ci_refine_pending",
+    }:
+        return True
+    note = str(rec.get("note") or "").lower()
+    if "interim" in note and "ci refine" in note:
+        return True
+    return False
+
+
+def _loop_iter_dir(run_dir: Path, loop_it: int) -> Path:
+    return run_dir / f"iter_{int(loop_it):03d}"
+
+
+def _ci_refine_live_from_history(
+    run_dir: Path | None,
+    history: list[dict[str, Any]],
+    *,
+    has_imported_slot: bool,
+) -> dict[str, Any] | None:
+    """Live overlay for an interim history gen whose CI refine is still running.
+
+    Reads ``iter_XXX/eval_post/*/eval_progress.json`` (and optional
+    ``ci_refine_job.json``) so gen N interim metrics stay on gen N while the
+    loop advances to generate/train later iterations.
+    """
+    if run_dir is None or not run_dir.is_dir():
+        return None
+
+    interim_rec: dict[str, Any] | None = None
+    for rec in history:
+        if isinstance(rec, dict) and _is_interim_history_record(rec):
+            interim_rec = rec
+            # Prefer the latest interim (highest generation) if several exist.
+    if interim_rec is None:
+        # Also pick up refine job even if history flag already cleared mid-write.
+        for rec in reversed(history):
+            if not isinstance(rec, dict) or _is_imported_history_record(rec):
+                continue
+            try:
+                lit = int(rec.get("iteration"))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+            if lit < 0:
+                continue
+            job = _read_json(_loop_iter_dir(run_dir, lit) / "ci_refine_job.json")
+            prog = _read_json(
+                _loop_iter_dir(run_dir, lit) / "eval_post" / "heldout" / "eval_progress.json"
+            )
+            if job or (isinstance(prog, dict) and prog.get("status") == "in_progress"):
+                interim_rec = rec
+                break
+        if interim_rec is None:
+            return None
+
+    gen = _history_record_generation(interim_rec, has_imported_slot=has_imported_slot)
+    try:
+        loop_it = int(interim_rec.get("iteration"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        loop_it = max(0, gen - (2 if has_imported_slot else 1))
+
+    iter_dir = _loop_iter_dir(run_dir, loop_it)
+    job = _read_json(iter_dir / "ci_refine_job.json")
+    held_prog = _read_json(iter_dir / "eval_post" / "heldout" / "eval_progress.json") or {}
+    # Prefer refine tag progress; fall back to whatever is in heldout progress.
+    prog = held_prog if isinstance(held_prog, dict) else {}
+    refine_running = bool(
+        (isinstance(job, dict) and interim_rec.get("ci_refine_pending") is not False)
+        or prog.get("status") == "in_progress"
+        or "ci_refine" in str(prog.get("tag") or "")
+        or interim_rec.get("ci_refine_pending") is True
+    )
+    if not refine_running and not _is_interim_history_record(interim_rec):
+        return None
+
+    # Seed from interim history, then overlay live refine progress when present.
+    heldout = interim_rec.get("heldout") if isinstance(interim_rec.get("heldout"), dict) else {}
+    post_h = heldout.get("post") or interim_rec.get("post_heldout")
+    point: dict[str, Any] = {
+        "generation": gen,
+        "kind": "live",
+        "label": f"gen {gen} · interim (CI refine)",
+        "loop_iteration": loop_it,
+        "kinds": ["eval", "interim"],
+        "heldout_instant": _acc(post_h),
+        "heldout_high": _nested_high_acc(post_h),
+        "ci_refine_pending": True,
+    }
+    if isinstance(post_h, dict):
+        ci = post_h.get("ci") if isinstance(post_h.get("ci"), dict) else {}
+        inst_ci = ci.get("instant") if isinstance(ci.get("instant"), dict) else {}
+        high_ci = ci.get("high") if isinstance(ci.get("high"), dict) else {}
+        if inst_ci.get("half_width") is not None:
+            point["heldout_instant_ci_half"] = float(inst_ci["half_width"])
+        if high_ci.get("half_width") is not None:
+            point["heldout_high_ci_half"] = float(high_ci["half_width"])
+        n = post_h.get("sample_size") or (post_h.get("instant") or {}).get("total")
+        if n is not None:
+            point["n"] = n
+
+    if prog.get("status") == "in_progress" or prog.get("instant"):
+        inst = prog.get("instant") if isinstance(prog.get("instant"), dict) else {}
+        high = prog.get("high") if isinstance(prog.get("high"), dict) else {}
+        inst_ci = prog.get("instant_ci") if isinstance(prog.get("instant_ci"), dict) else {}
+        high_ci = prog.get("high_ci") if isinstance(prog.get("high_ci"), dict) else {}
+        prog_n = prog.get("n")
+        hist_n = point.get("n")
+        # Only replace interim metrics when refine has at least as many samples.
+        # A restarted refine batch (n=40 after interim n=80) must not regress the chart.
+        can_replace = hist_n is None or prog_n is None or float(prog_n) >= float(hist_n)
+        point["tag"] = prog.get("tag") or point.get("tag")
+        point["status"] = prog.get("status") or point.get("status")
+        point["max_n"] = prog.get("max_n") or prog.get("n_pool") or point.get("max_n")
+        if can_replace and inst.get("accuracy") is not None:
+            point["heldout_instant"] = float(inst["accuracy"])
+            if high.get("accuracy") is not None:
+                point["heldout_high"] = float(high["accuracy"])
+            if inst_ci.get("half_width") is not None:
+                point["heldout_instant_ci_half"] = float(inst_ci["half_width"])
+            if high_ci.get("half_width") is not None:
+                point["heldout_high_ci_half"] = float(high_ci["half_width"])
+            if prog_n is not None:
+                point["n"] = prog_n
+        display_n = point.get("n") if point.get("n") is not None else prog_n
+        display_max = point.get("max_n") or prog.get("n_pool") or 200
+        point["label"] = f"gen {gen} · interim CI refine n={display_n}/{display_max}"
+
+    if point.get("heldout_instant") is None and point.get("heldout_high") is None:
+        return None
+    return point
+
+
 def _history_series(history: list[dict[str, Any]]) -> dict[str, list[Any]]:
     """Build chart series from history.jsonl dual-eval records."""
     series: dict[str, list[Any]] = {
@@ -402,12 +603,15 @@ def _build_accuracy_chart(
     eval_progress_live: dict[str, Any],
     ckpt_view: dict[str, Any],
     headline: dict[str, Any],
+    run_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Build a clean generation timeline for the accuracy chart.
 
     - generation 0: parent baseline only (never mixed with run metrics)
-    - generation k+1: finalized loop iteration k (from history.jsonl)
-    - live: current incomplete generation (eval progress / intermediate ckpt)
+    - generation 1: imported parent checkpoint (when present)
+    - generation k+offset: loop iteration k (finalized or interim)
+    - interim gens keep their slot while background CI refine runs
+    - live: active eval for current loop work, or CI refine for interim gen
     """
     points: list[dict[str, Any]] = []
 
@@ -434,13 +638,12 @@ def _build_accuracy_chart(
             }
         )
 
+    has_imported_slot = _history_has_imported_slot(history)
     finalized_gens: set[int] = set()
+    interim_gens: set[int] = set()
     for rec in history:
         raw_it = rec.get("iteration")
-        try:
-            gen = int(raw_it) + 1  # loop iter 0 → gen 1
-        except (TypeError, ValueError):
-            gen = len(points)
+        gen = _history_record_generation(rec, has_imported_slot=has_imported_slot)
         train_seed = rec.get("train_seed") if isinstance(rec.get("train_seed"), dict) else {}
         heldout = rec.get("heldout") if isinstance(rec.get("heldout"), dict) else {}
         post_t = train_seed.get("post") or rec.get("post_train") or rec.get("post")
@@ -461,18 +664,42 @@ def _build_accuracy_chart(
                 return float(side["half_width"])
             return None
 
+        is_import = _is_imported_history_record(rec)
+        is_interim = (not is_import) and _is_interim_history_record(rec)
+        if is_import:
+            kind = "imported"
+            label = f"gen {gen} · imported"
+        elif is_interim:
+            kind = "interim"
+            n = None
+            if isinstance(post_h, dict):
+                n = post_h.get("sample_size") or (post_h.get("instant") or {}).get("total")
+            label = f"gen {gen} · interim" + (f" n={n}" if n is not None else "")
+            interim_gens.add(gen)
+        else:
+            kind = "finalized"
+            label = f"gen {gen} · finalized"
+            finalized_gens.add(gen)
+        # Interim still occupies its generation slot so live for later iters
+        # cannot collide / replot the same metrics one step to the right.
+        if is_import or is_interim:
+            finalized_gens.add(gen)
+
         points.append(
             {
                 "generation": gen,
-                "kind": "finalized",
-                "label": f"gen {gen} · finalized",
+                "kind": kind,
+                "label": label,
                 "loop_iteration": raw_it,
                 "heldout_instant": hi,
                 "heldout_high": hh,
                 "train_seed_instant": ti,
                 "train_seed_high": th,
                 "heldout_instant_ci_half": _half_from_post(post_h, "instant"),
+                "heldout_high_ci_half": _half_from_post(post_h, "high"),
                 "train_seed_instant_ci_half": _half_from_post(post_t, "instant"),
+                "train_seed_high_ci_half": _half_from_post(post_t, "high"),
+                "ci_refine_pending": bool(is_interim),
                 "overfit_gap": (
                     float(ti) - float(hi)
                     if ti is not None and hi is not None
@@ -480,9 +707,8 @@ def _build_accuracy_chart(
                 ),
             }
         )
-        finalized_gens.add(gen)
 
-    # Live / current generation (eval in progress OR completed pre-eval before history write)
+    # Live for the *current* loop phase (eval_pre/post/train of status.iteration).
     live = _live_generation_point(
         status=status,
         eval_progress_live=eval_progress_live,
@@ -490,11 +716,36 @@ def _build_accuracy_chart(
         headline=headline,
         finalized_gens=finalized_gens,
         has_baseline=baseline is not None,
+        has_imported_slot=has_imported_slot,
     )
+
+    # Background CI refine for interim gens (e.g. gen2 n=80 while iter1 generates).
+    # Must stay on the interim generation — never appear as the next gen.
+    refine_live = _ci_refine_live_from_history(
+        run_dir, history, has_imported_slot=has_imported_slot
+    )
+    if refine_live is not None:
+        if live is None:
+            live = refine_live
+        else:
+            live_gen = live.get("generation")
+            refine_gen = refine_live.get("generation")
+            # Drop a "next gen" live that only echoes interim metrics / no own eval.
+            live_has_own_eval = bool(
+                live.get("tag")
+                or (live.get("n") is not None and "eval" in (live.get("kinds") or []))
+            ) and live_gen not in interim_gens
+            if live_gen == refine_gen:
+                # Same slot: prefer refine progress overlay.
+                live = refine_live
+            elif not live_has_own_eval:
+                live = refine_live
+            # else keep main live (real eval for a later gen); interim stays in points
 
     gens = [p["generation"] for p in points]
     max_final = max(gens) if gens else (0 if baseline else -1)
-    x_max = max(max_final, live["generation"] if live else max_final, 1)
+    live_gen_x = live["generation"] if live and live.get("heldout_instant") is not None else None
+    x_max = max(max_final, live_gen_x if live_gen_x is not None else max_final, 1)
 
     return {
         "points": points,
@@ -513,46 +764,85 @@ def _live_generation_point(
     headline: dict[str, Any],
     finalized_gens: set[int],
     has_baseline: bool,
+    has_imported_slot: bool = False,
 ) -> dict[str, Any] | None:
-    """Current generation point not yet in history.jsonl."""
+    """Current generation point not yet in history.jsonl.
+
+    Only emits while eval/train work is actually active. Stale headline
+    accuracies or leftover checkpoints must not create a ghost generation
+    that re-plots the previous gen's metrics one step to the right.
+    """
     prog = eval_progress_live.get("eval_progress") or status.get("eval_progress") or {}
+    phase = str(status.get("phase") or headline.get("phase") or "")
+    # Active when explicitly in progress, or mid eval_pre/eval_post with a progress
+    # snapshot (batch boundaries briefly flip status to "complete").
+    mid_eval_phase = phase.startswith("eval_") or phase in {
+        "eval_pre",
+        "eval_post",
+        "eval_post_prelim",
+    }
+    prog_active = isinstance(prog, dict) and (
+        prog.get("status") == "in_progress"
+        or (
+            mid_eval_phase
+            and (prog.get("instant") is not None or prog.get("n") is not None)
+        )
+    )
     eval_active = bool(
         status.get("eval_in_progress")
         or eval_progress_live.get("eval_in_progress")
-        or (isinstance(prog, dict) and prog.get("status") in {"in_progress", "complete"})
+        or prog_active
+        # First batch of a dual eval may take minutes before any progress
+        # snapshot is written; still show a live marker from phase alone.
+        or mid_eval_phase
     )
-    # Prefer structured progress; fall back to status headline accuracies during a run
-    has_status_metrics = (
-        headline.get("heldout_instant") is not None
-        or headline.get("train_seed_instant") is not None
+    train_progress = ckpt_view.get("live_train_progress")
+    train_active = bool(
+        isinstance(train_progress, dict)
+        and (
+            train_progress.get("in_progress")
+            or train_progress.get("status") == "in_progress"
+        )
     )
+    # No active work → no live point. Headline metrics belong to history already.
+    if not eval_active and not train_active:
+        return None
+
     mid = ckpt_view.get("last_intermediate")
     live_ckpt = mid if isinstance(mid, dict) else None
     fin = ckpt_view.get("last_finalized")
+    # Only surface checkpoints as "live" while training is actually running.
+    if live_ckpt and not train_active:
+        live_ckpt = None
     if (
         live_ckpt
         and isinstance(fin, dict)
         and live_ckpt.get("name") is not None
         and live_ckpt.get("name") == fin.get("name")
-        and live_ckpt.get("role") != "live_or_latest"
     ):
         live_ckpt = None
 
-    if not eval_active and not has_status_metrics and not live_ckpt:
-        return None
-
     raw_it = headline.get("iteration")
+    # Prefer the iteration stamped on the live eval progress (CI refine can
+    # still run after status.iteration has advanced to the next gen).
+    prog_it = None
+    if isinstance(prog, dict) and prog.get("iteration") is not None:
+        prog_it = prog.get("iteration")
+    elif eval_progress_live.get("iteration") is not None:
+        prog_it = eval_progress_live.get("iteration")
+    if eval_active and prog_it is not None:
+        raw_it = prog_it
     try:
         loop_it = int(raw_it) if raw_it is not None else 0
     except (TypeError, ValueError):
         loop_it = 0
-    gen = loop_it + 1  # gen 0 reserved for baseline
-    # If this generation is already finalized in history, only show live if eval in progress
-    if gen in finalized_gens and not (
-        status.get("eval_in_progress") or eval_progress_live.get("eval_in_progress")
-    ):
-        # Still allow intermediate checkpoint marker at next gen?
-        if live_ckpt and live_ckpt.get("role") == "live_or_latest":
+    # Gen 0 = baseline. With imported parent as gen 1, loop iter k → gen k+2.
+    import_offset = 1 if has_imported_slot else 0
+    gen = loop_it + 1 + import_offset
+
+    # Training the next iteration: place live checkpoint on the upcoming gen.
+    if gen in finalized_gens and not eval_active:
+        if train_active and live_ckpt:
             gen = max(finalized_gens) + 1 if finalized_gens else gen
         else:
             return None
@@ -565,7 +855,7 @@ def _live_generation_point(
         "kinds": [],
     }
 
-    if isinstance(prog, dict) and prog.get("instant"):
+    if eval_active and isinstance(prog, dict) and prog.get("instant"):
         point["kinds"].append("eval")
         tag = str(prog.get("tag") or "")
         inst = prog.get("instant") if isinstance(prog.get("instant"), dict) else {}
@@ -576,7 +866,7 @@ def _live_generation_point(
         acc_h = high.get("accuracy")
         half_i = inst_ci.get("half_width")
         half_h = high_ci.get("half_width")
-        if "heldout" in tag or "heldout" not in tag and "train" not in tag:
+        if "heldout" in tag or ("heldout" not in tag and "train" not in tag):
             point["heldout_instant"] = acc_i
             point["heldout_high"] = acc_h
             point["heldout_instant_ci_half"] = half_i
@@ -585,7 +875,6 @@ def _live_generation_point(
             point["train_seed_instant"] = acc_i
             point["train_seed_high"] = acc_h
             point["train_seed_instant_ci_half"] = half_i
-        # If only heldout so far, still show status train-seed if available
         point["n"] = prog.get("n")
         point["max_n"] = prog.get("max_n") or prog.get("n_pool")
         point["tag"] = tag
@@ -593,16 +882,35 @@ def _live_generation_point(
         point["label"] = (
             f"gen {gen} · {tag} n={prog.get('n')}/{prog.get('max_n') or prog.get('n_pool')}"
         )
-    # Fill gaps from status headline (e.g. heldout done, train-seed not yet)
-    if point.get("heldout_instant") is None and headline.get("heldout_instant") is not None:
-        point["heldout_instant"] = headline.get("heldout_instant")
-        point["heldout_high"] = headline.get("heldout_high")
-        point.setdefault("kinds", []).append("eval")
-    if point.get("train_seed_instant") is None and headline.get("train_seed_instant") is not None:
-        point["train_seed_instant"] = headline.get("train_seed_instant")
-        point["train_seed_high"] = headline.get("train_seed_high")
+    # Fill gaps from status headline only while an eval is actually running.
+    # Never copy last-gen headline metrics onto the next generation.
+    if eval_active:
+        if point.get("heldout_instant") is None and headline.get("heldout_instant") is not None:
+            # Only borrow headline when live gen matches the iteration those
+            # headline numbers came from (same loop iter → same chart gen).
+            head_it = headline.get("iteration")
+            try:
+                head_it_i = int(head_it) if head_it is not None else None
+            except (TypeError, ValueError):
+                head_it_i = None
+            if head_it_i is None or head_it_i == loop_it:
+                point["heldout_instant"] = headline.get("heldout_instant")
+                point["heldout_high"] = headline.get("heldout_high")
+                point.setdefault("kinds", []).append("eval")
+        if (
+            point.get("train_seed_instant") is None
+            and headline.get("train_seed_instant") is not None
+        ):
+            head_it = headline.get("iteration")
+            try:
+                head_it_i = int(head_it) if head_it is not None else None
+            except (TypeError, ValueError):
+                head_it_i = None
+            if head_it_i is None or head_it_i == loop_it:
+                point["train_seed_instant"] = headline.get("train_seed_instant")
+                point["train_seed_high"] = headline.get("train_seed_high")
 
-    if live_ckpt:
+    if live_ckpt and train_active:
         point["kinds"].append("checkpoint")
         point["checkpoint"] = {
             "name": live_ckpt.get("name"),
@@ -610,12 +918,17 @@ def _live_generation_point(
             "role": live_ckpt.get("role"),
         }
         y_ref = point.get("heldout_instant")
-        if y_ref is None:
+        if y_ref is None and eval_active:
             y_ref = headline.get("heldout_instant")
         point["checkpoint_y"] = y_ref if y_ref is not None else 0.5
 
-    # Don't emit an empty live point
-    if not point.get("kinds") and point.get("heldout_instant") is None and point.get("train_seed_instant") is None:
+    # Need real accuracy (or an active eval marker) — never emit empty/ghost gens.
+    if point.get("heldout_instant") is None and point.get("train_seed_instant") is None:
+        # Allow a bare mid-eval marker (no samples yet) so the axis extends.
+        if eval_active and mid_eval_phase:
+            point.setdefault("kinds", []).append("eval")
+            point["label"] = f"gen {gen} · {phase}"
+            return point
         return None
     if not point.get("kinds"):
         point["kinds"] = ["eval"]
@@ -882,6 +1195,7 @@ def build_snapshot(
         eval_progress_live=eval_progress_live,
         ckpt_view=ckpt_view,
         headline=headline,
+        run_dir=run_dir,
     )
     series["chart"] = chart
     series["in_progress"] = chart.get("live")
