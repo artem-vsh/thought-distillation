@@ -25,12 +25,13 @@ from common import (
 # Script paths (this project root)
 # ---------------------------------------------------------------------------
 
-ASK_ARITHMETIC_SCRIPT = REPO_ROOT / "ask_arithmetic.py"
-TEST_ARITHMETIC_SCRIPT = REPO_ROOT / "test_arithmetic.py"
-TRAIN_MATH_LLM_JUDGE_SCRIPT = REPO_ROOT / "train_math_llm_judge.py"
+_MATHTASK_DIR = Path(__file__).resolve().parent
+ASK_ARITHMETIC_SCRIPT = _MATHTASK_DIR / "ask_arithmetic.py"
+TEST_ARITHMETIC_SCRIPT = _MATHTASK_DIR / "test_arithmetic.py"
+TRAIN_MATH_LLM_JUDGE_SCRIPT = _MATHTASK_DIR / "train_math_llm_judge.py"
 
-# Local seed (copy of parent data/arithmetic_operations.csv)
-LOOP_DATA_DIR = Path(__file__).resolve().parent / "data"
+# Seed data lives at the project root
+LOOP_DATA_DIR = REPO_ROOT / "data"
 LOOP_SEED_DATA = LOOP_DATA_DIR / "arithmetic_operations.csv"
 REPO_SEED_DATA = REPO_ROOT / "data" / "arithmetic_operations.csv"
 
@@ -48,13 +49,13 @@ def default_seed_data() -> Path:
 
 def math_model_defaults() -> dict[str, Any]:
     """Pull model / renderer defaults from ask + train scripts."""
-    from ask_arithmetic import (
+    from mathtask.ask_arithmetic import (
         FINAL_CHANNEL_PREFILL,
         INPUT_CSV,
         MODEL,
         RENDERER_BY_EFFORT,
     )
-    from train_math_llm_judge import (
+    from mathtask.train_math_llm_judge import (
         DEFAULT_JUDGE_MAX_TOKENS,
         DEFAULT_JUDGE_MODEL,
         DEFAULT_JUDGE_RENDERER,
@@ -92,7 +93,7 @@ def load_train_problems(path: Path) -> list[MathExample]:
     Ensures the same schema/validation the trainer uses (both columns required
     and non-empty).
     """
-    from train_math_llm_judge import load_math_problems
+    from mathtask.train_math_llm_judge import load_math_problems
 
     problems = load_math_problems(Path(path))
     return [MathExample(operation=p.operation, solution=p.solution) for p in problems]
@@ -100,7 +101,7 @@ def load_train_problems(path: Path) -> list[MathExample]:
 
 def make_math_prompt(operation: str) -> str:
     """Same user prompt as ask_arithmetic / train_math_llm_judge."""
-    from ask_arithmetic import make_prompt
+    from mathtask.ask_arithmetic import make_prompt
 
     return make_prompt(operation)
 
@@ -121,7 +122,8 @@ def run_ask_arithmetic(
         "high": "--high",
     }[effort]
     args = [
-        str(ASK_ARITHMETIC_SCRIPT),
+        "-m",
+        "mathtask.ask_arithmetic",
         flag,
         "--input",
         str(input_csv),
@@ -149,7 +151,8 @@ def run_test_arithmetic(
         "high": "--high",
     }[effort]
     args = [
-        str(TEST_ARITHMETIC_SCRIPT),
+        "-m",
+        "mathtask.test_arithmetic",
         flag,
         "--input",
         str(input_csv),

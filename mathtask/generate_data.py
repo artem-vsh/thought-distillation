@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 # Standalone project root (this directory).
-_LOOP_ROOT = Path(__file__).resolve().parent
+_LOOP_ROOT = Path(__file__).resolve().parent.parent
 if str(_LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(_LOOP_ROOT))
 
@@ -41,8 +41,8 @@ from common import (
     sample_examples,
     write_math_csv,
 )
-from math_integration import make_math_prompt
-from tinker_sample import SampleRequest, sample_many_sync
+from mathtask.math_integration import make_math_prompt
+from mathtask.tinker_sample import SampleRequest, sample_many_sync
 
 SUPPORTED_OPS_HINT = """
 Supported expression surface syntax (same as test_arithmetic.evaluate_operation):

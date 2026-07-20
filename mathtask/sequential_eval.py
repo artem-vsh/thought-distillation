@@ -16,9 +16,9 @@ from common import (
     save_json,
     write_operations_csv,
 )
-from loop_config import EvalCIConfig
-from run_evals import eval_effort
-from stats_ci import DiffCI, ProportionCI, diff_ci, proportion_ci
+from core.loop_config import EvalCIConfig
+from mathtask.run_evals import eval_effort
+from core.stats_ci import DiffCI, ProportionCI, diff_ci, proportion_ci
 
 
 def _utc_now() -> str:

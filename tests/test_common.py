@@ -179,7 +179,7 @@ def test_save_json_rejects_nan_without_overwriting(tmp_path: Path) -> None:
 
 def test_default_seed_points_at_loop_data() -> None:
     from common import DEFAULT_SEED_DATA
-    from math_integration import LOOP_SEED_DATA, default_seed_data
+    from mathtask.math_integration import LOOP_SEED_DATA, default_seed_data
 
     assert DEFAULT_SEED_DATA.is_file()
     assert default_seed_data().is_file()
@@ -188,7 +188,7 @@ def test_default_seed_points_at_loop_data() -> None:
 
 
 def test_math_integration_manifest_keys() -> None:
-    from math_integration import math_model_defaults
+    from mathtask.math_integration import math_model_defaults
 
     d = math_model_defaults()
     assert d["policy_renderer"] == "gpt_oss_no_sysprompt"
@@ -199,7 +199,7 @@ def test_math_integration_manifest_keys() -> None:
 
 
 def test_progress_tracker_writes_status(tmp_path: Path) -> None:
-    from progress import ProgressTracker
+    from core.progress import ProgressTracker
 
     tracker = ProgressTracker(tmp_path)
     tracker.set_phase("generate", "working", iteration=0)
@@ -212,7 +212,7 @@ def test_progress_tracker_writes_status(tmp_path: Path) -> None:
 
 
 def test_progress_checkpoint_index_is_idempotent(tmp_path: Path) -> None:
-    from progress import ProgressTracker
+    from core.progress import ProgressTracker
 
     tracker = ProgressTracker(tmp_path / "run")
     train_log = tmp_path / "train"
@@ -387,7 +387,7 @@ def test_marginal_streak_is_recomputed_from_history() -> None:
 def test_train_argv_auto_switch_base_vs_checkpoint() -> None:
     from pathlib import Path
 
-    from train_step import build_train_argv
+    from mathtask.train_step import build_train_argv
 
     base_argv = build_train_argv(
         data_path=Path("data.csv"),

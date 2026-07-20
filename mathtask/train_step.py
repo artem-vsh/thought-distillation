@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 # Standalone project root (this directory).
-_LOOP_ROOT = Path(__file__).resolve().parent
+_LOOP_ROOT = Path(__file__).resolve().parent.parent
 if str(_LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(_LOOP_ROOT))
 
@@ -47,7 +47,7 @@ from common import (
     run_python,
     save_json,
 )
-from math_integration import (
+from mathtask.math_integration import (
     TRAIN_MATH_LLM_JUDGE_SCRIPT,
     load_train_problems,
     math_model_defaults,
@@ -81,7 +81,8 @@ def build_train_argv(
     """
     defaults = math_model_defaults()
     args = [
-        str(TRAIN_MATH_LLM_JUDGE_SCRIPT),
+        "-m",
+        "mathtask.train_math_llm_judge",
         f"data_path={data_path}",
         f"log_path={log_path}",
         f"model_name={model}",

@@ -461,7 +461,7 @@ def programmatic_solution(operation: str) -> str | None:
     if len(operation) > MAX_PROGRAMMATIC_OP_LEN:
         return None
     # Import lazily so loop modules stay importable without full env for pure helpers.
-    from test_arithmetic import evaluate_operation
+    from mathtask.test_arithmetic import evaluate_operation
 
     try:
         value = evaluate_operation(operation)
@@ -477,7 +477,7 @@ def programmatic_solution(operation: str) -> str | None:
 
 def solutions_match(expected: str, actual: str) -> bool:
     """Numeric equality with the same tolerance as test_arithmetic scoring."""
-    from test_arithmetic import extract_numeric_answer, numbers_equal
+    from mathtask.test_arithmetic import extract_numeric_answer, numbers_equal
 
     exp = extract_numeric_answer(expected)
     act = extract_numeric_answer(actual)
@@ -631,7 +631,7 @@ def score_answers_csv(
     ensure_dir(scored_csv.parent)
 
     if use_cli:
-        from math_integration import run_test_arithmetic
+        from mathtask.math_integration import run_test_arithmetic
 
         run_test_arithmetic(
             effort=effort,
@@ -639,7 +639,7 @@ def score_answers_csv(
             output_csv=scored_csv,
         )
     else:
-        from test_arithmetic import is_completed, is_correct
+        from mathtask.test_arithmetic import is_completed, is_correct
 
         with (
             answers_csv.open(newline="", encoding="utf-8-sig") as inp,

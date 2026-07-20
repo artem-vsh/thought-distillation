@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from loop import autoresearch
+import autoresearch
 from common import (
     DifferentialMetrics,
     EvalMetrics,
@@ -419,7 +419,7 @@ def test_run_train_step_raises_when_no_checkpoint_saved(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from loop import train_step
+    from mathtask import train_step
 
     data = _seed_csv(tmp_path / "train.csv")
     # Trainer "runs" but never writes a checkpoints.jsonl (e.g. save_every

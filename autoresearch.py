@@ -88,13 +88,13 @@ from common import (
     write_operations_csv,
     write_split_manifest,
 )
-from generate_data import generate_variations
-from loop_config import EvalCIConfig, LoopConfig, load_loop_config, resolve_config_path
-from math_integration import check_model_consistency, write_integration_manifest
-from progress import ProgressTracker
-from sequential_eval import PrevInstantRef, run_sequential_differential
-from train_step import run_train_step
-from validate_data import validate_examples
+from mathtask.generate_data import generate_variations
+from core.loop_config import EvalCIConfig, LoopConfig, load_loop_config, resolve_config_path
+from mathtask.math_integration import check_model_consistency, write_integration_manifest
+from core.progress import ProgressTracker
+from mathtask.sequential_eval import PrevInstantRef, run_sequential_differential
+from mathtask.train_step import run_train_step
+from mathtask.validate_data import validate_examples
 
 
 _RESUMABLE_CONFIG_FIELDS = (

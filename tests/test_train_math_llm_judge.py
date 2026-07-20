@@ -5,8 +5,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ask_arithmetic import FINAL_CHANNEL_PREFILL, RENDERER_BY_EFFORT, make_prompt
-from train_math_llm_judge import (
+from mathtask.ask_arithmetic import FINAL_CHANNEL_PREFILL, RENDERER_BY_EFFORT, make_prompt
+from mathtask.train_math_llm_judge import (
     DEFAULT_POLICY_PREFILL,
     DEFAULT_POLICY_RENDERER,
     MathProblem,
@@ -46,15 +46,20 @@ def test_extract_judge_score_empty() -> None:
 
 
 def test_make_judge_messages_has_no_reference_solution() -> None:
-    messages = make_judge_messages("2+2", "4")
+    # Judge sees only the problem and the policy's answer; a distinctive
+    # wrong answer stands in for a value that must NOT be echoed as a
+    # reference solution anywhere in the prompt.
+    messages = make_judge_messages("2+2", "417")
     assert len(messages) == 1
     assert messages[0]["role"] == "user"
     content = messages[0]["content"]
     assert make_prompt("2+2") in content
     assert "Expression: 2+2" in content
-    assert "Model answer: 4" in content
+    assert "Model answer: 417" in content
+    # The answer appears exactly once (as the model answer, never as a
+    # reference), and no reference-solution label is present.
+    assert content.count("417") == 1
     assert "Reference solution" not in content
-    assert "reference" not in content.lower()
     assert "<score>" in content
     assert "independently" in content
 
@@ -84,7 +89,7 @@ def test_create_tinker_judge_accepts_model_path_kwarg() -> None:
     """Judge can take an optional checkpoint path (no network call here)."""
     import inspect
 
-    from train_math_llm_judge import create_tinker_judge
+    from mathtask.train_math_llm_judge import create_tinker_judge
 
     sig = inspect.signature(create_tinker_judge)
     assert "judge_model_path" in sig.parameters

@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 
 # Standalone project root (this directory).
-_LOOP_ROOT = Path(__file__).resolve().parent
+_LOOP_ROOT = Path(__file__).resolve().parent.parent
 if str(_LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(_LOOP_ROOT))
 
@@ -49,7 +49,7 @@ from common import (
     write_math_csv,
     write_operations_csv,
 )
-from math_integration import run_ask_arithmetic
+from mathtask.math_integration import run_ask_arithmetic
 
 
 def ensure_eval_sample(

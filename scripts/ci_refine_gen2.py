@@ -14,13 +14,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-_LOOP_ROOT = Path(__file__).resolve().parent
+_LOOP_ROOT = Path(__file__).resolve().parent.parent
 if str(_LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(_LOOP_ROOT))
 
 from common import append_jsonl, load_json, save_json
-from loop_config import EvalCIConfig
-from sequential_eval import run_sequential_differential
+from core.loop_config import EvalCIConfig
+from mathtask.sequential_eval import run_sequential_differential
 
 
 def _utc_now() -> str:

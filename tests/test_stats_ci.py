@@ -5,8 +5,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from loop_config import EvalCIConfig, load_loop_config
-from stats_ci import diff_ci, proportion_ci, z_critical
+from core.loop_config import EvalCIConfig, load_loop_config
+from core.stats_ci import diff_ci, proportion_ci, z_critical
 
 
 def test_z_critical_p05() -> None:

@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Sequence
 
-from ask_arithmetic import (
+from mathtask.ask_arithmetic import (
     FINAL_CHANNEL_PREFILL,
     MAX_TOKENS,
     NUM_IN_FLIGHT,

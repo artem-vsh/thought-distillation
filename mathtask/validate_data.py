@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 # Standalone project root (this directory).
-_LOOP_ROOT = Path(__file__).resolve().parent
+_LOOP_ROOT = Path(__file__).resolve().parent.parent
 if str(_LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(_LOOP_ROOT))
 
@@ -40,7 +40,7 @@ from common import (
     solutions_match,
     write_math_csv,
 )
-from tinker_sample import SampleRequest, sample_many_sync
+from mathtask.tinker_sample import SampleRequest, sample_many_sync
 
 
 def build_validation_prompt(ex: MathExample) -> str:

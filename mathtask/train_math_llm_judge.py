@@ -39,7 +39,7 @@ import chz
 import tinker
 from tinker.types import LossFnType
 
-from ask_arithmetic import (
+from mathtask.ask_arithmetic import (
     FINAL_CHANNEL_PREFILL,
     INPUT_CSV as DEFAULT_DATA_CSV,
     RENDERER_BY_EFFORT,
