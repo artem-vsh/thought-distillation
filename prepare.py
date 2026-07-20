@@ -1,83 +1,36 @@
-#!/usr/bin/env python3
-"""Autoresearch loop for math: generate → validate → eval → train → re-eval.
+"""Frozen harness for the autoresearch loop: data, evals, train, run setup.
 
-Integrates with existing math scripts (not reimplemented):
-
-  - ``ask_arithmetic.py``        — eval sampling (instant / high)
-  - ``test_arithmetic.py``       — eval scoring
-  - ``train_math_llm_judge.py``  — RL train (instant policy, high judge)
-  - ``data/arithmetic_operations.csv`` — seed (copy of ``data/``)
-
-Each iteration persists intermediate artifacts under the run dir so a
-real-time dashboard can poll ``status.json`` / ``events.jsonl``:
-
-  status.json, events.jsonl, checkpoints.jsonl, train_progress.json,
-  history.jsonl, data_snapshots.jsonl, integration.json,
-  iter_XXX/{generated,validated,eval_pre,eval_post,train,metrics.json}
-
-Example::
-
-    source .venv/bin/activate
-    python -m autoresearch \\
-        --seed-data data/arithmetic_operations.csv \\
-        --max-iters 5 \\
-        --eval-sample-size 100 \\
-        --gen-target 100 \\
-        --train-max-steps 20
+This file is the fixed contract the loop builds on (Karpathy-autoresearch
+style ``prepare.py``): run initialization with a never-train held-out split,
+adaptive-CI dual evals with carry-forward, the RL train step, and the
+crash-safe iteration bookkeeping. Iterate on ``loop.py`` (and
+``loop_config.toml``), not on this file.
 """
 
 from __future__ import annotations
 
-import argparse
-import json
-import os
 import shutil
-import sys
-from dataclasses import replace
-from datetime import datetime, timezone
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-# Standalone project root (this directory).
-_LOOP_ROOT = Path(__file__).resolve().parent
-if str(_LOOP_ROOT) not in sys.path:
-    sys.path.insert(0, str(_LOOP_ROOT))
-
 from core.defaults import (
     DEFAULT_EVAL_SAMPLE_SIZE,
-    DEFAULT_GEN_TARGET,
-    DEFAULT_GEN_TEMPERATURE,
     DEFAULT_HELDOUT_FRACTION,
-    DEFAULT_MARGINAL_DELTA,
-    DEFAULT_MARGINAL_STREAK,
-    DEFAULT_MAX_ITERS,
-    DEFAULT_MODEL,
-    DEFAULT_NOISE_Z,
-    DEFAULT_RUNS_ROOT,
-    DEFAULT_SEEDS_PER_BATCH,
-    DEFAULT_SEED_DATA,
-    DEFAULT_SEED_SAMPLES,
-    DEFAULT_TRAIN_EVAL_EVERY,
-    DEFAULT_TRAIN_GROUPS_PER_BATCH,
-    DEFAULT_TRAIN_GROUP_SIZE,
-    DEFAULT_TRAIN_LEARNING_RATE,
-    DEFAULT_TRAIN_LORA_RANK,
-    DEFAULT_TRAIN_MAX_STEPS,
-    DEFAULT_TRAIN_SAVE_EVERY,
-    DEFAULT_VARIATIONS_PER_SEED,
     MIN_HELDOUT_EVAL_SAMPLE,
 )
-from core.io import (
-    append_jsonl,
-    ensure_dir,
-    load_json,
-    save_json,
-    utc_now_tag,
-    write_jsonl,
+from core.history import _upsert_history_file, _upsert_state_history
+from core.io import ensure_dir, load_json, save_json, utc_now_tag
+from core.journal import (
+    _load_or_create_iteration_journal,
+    _mark_phase,
+    _phase_data,
+    _phase_done,
 )
+from core.loop_config import EvalCIConfig
 from core.metrics import DifferentialMetrics
-from core.runstate import LoopState, load_state, save_state
-from core.stopping import marginal_improvement_streak
+from core.progress import ProgressTracker
+from core.runstate import LoopState, _acquire_run_lock, load_state, save_state
 from mathtask.dataset import (
     assert_disjoint_train_heldout,
     filter_out_operations,
@@ -91,155 +44,10 @@ from mathtask.dataset import (
     write_split_manifest,
 )
 from mathtask.generate_data import generate_variations
-from core.loop_config import EvalCIConfig, LoopConfig, load_loop_config, resolve_config_path
-from mathtask.math_integration import check_model_consistency, write_integration_manifest
-from core.progress import ProgressTracker
+from mathtask.math_integration import write_integration_manifest
 from mathtask.sequential_eval import PrevInstantRef, run_sequential_differential
 from mathtask.train_step import run_train_step
 from mathtask.validate_data import validate_examples
-
-
-_RESUMABLE_CONFIG_FIELDS = (
-    "model",
-    "max_iters",
-    "marginal_delta",
-    "marginal_streak",
-    "noise_z",
-    "gen_target",
-    "seed_samples",
-    "variations_per_batch",
-    "seeds_per_batch",
-    "gen_temperature",
-    "eval_sample_size",
-    "heldout_fraction",
-    "train_max_steps",
-    "groups_per_batch",
-    "group_size",
-    "save_every",
-    "eval_every",
-    "learning_rate",
-    "lora_rank",
-    "rng_seed",
-    "skip_generate",
-    "skip_train",
-    "skip_high_eval",
-    "target_ci_pp",
-    "p_value",
-    "eval_batch_size",
-    "eval_max_sample_size",
-)
-_IMMUTABLE_RESUME_FIELDS = {"heldout_fraction", "eval_sample_size"}
-# Explicit flags that are meaningful on resume even though they are not
-# restored config: --resume itself and per-invocation controls like --force.
-_RESUME_CONTROL_FIELDS = {"resume", "force"}
-
-
-def _serialize_args(args: argparse.Namespace) -> dict[str, Any]:
-    return {
-        key: (str(value) if isinstance(value, Path) else value)
-        for key, value in vars(args).items()
-    }
-
-
-def _explicit_cli_dests(argv: list[str]) -> set[str]:
-    """Return dests of options explicitly present on the command line.
-
-    Implemented as a second parse with all defaults suppressed, so argparse
-    features like unambiguous abbreviations (``--max-it``) and
-    ``--no-`` boolean negations resolve to the correct dest — raw token
-    scanning silently misses those and would drop user intent on resume.
-    """
-    parser = build_parser(suppress_defaults=True)
-    namespace, _unknown = parser.parse_known_args(argv)
-    return set(vars(namespace))
-
-
-def resolve_resume_config(
-    args: argparse.Namespace,
-    *,
-    argv: list[str],
-) -> tuple[argparse.Namespace, dict[str, Any] | None]:
-    """Restore saved run settings unless the user explicitly overrides them."""
-    if args.resume is None:
-        return args, None
-
-    config_path = args.resume.resolve() / "config.json"
-    if not config_path.is_file():
-        raise FileNotFoundError(
-            f"Cannot safely resume without the original config: {config_path}"
-        )
-    saved = load_json(config_path)
-    if not isinstance(saved, dict):
-        raise ValueError(f"Expected a JSON object in {config_path}")
-
-    explicit = _explicit_cli_dests(argv)
-    overrides: dict[str, dict[str, Any]] = {}
-    for field_name in _RESUMABLE_CONFIG_FIELDS:
-        if field_name not in saved:
-            continue
-        current = getattr(args, field_name)
-        previous = saved[field_name]
-        if field_name in explicit:
-            if current != previous:
-                if field_name in _IMMUTABLE_RESUME_FIELDS:
-                    raise ValueError(
-                        f"{field_name} is fixed when a run is created "
-                        f"(saved={previous!r}, requested={current!r})"
-                    )
-                overrides[field_name] = {"previous": previous, "effective": current}
-        else:
-            setattr(args, field_name, previous)
-
-    # Options the user passed that have no effect on a resumed run
-    # (e.g. --seed-data, --runs-root, --run-name). Warn instead of silently
-    # dropping the intent.
-    ignored_fields = sorted(
-        explicit - set(_RESUMABLE_CONFIG_FIELDS) - _RESUME_CONTROL_FIELDS
-    )
-    if ignored_fields:
-        print(
-            f"WARNING: ignored on resume (run is defined by {config_path}): "
-            + ", ".join(f"--{name.replace('_', '-')}" for name in ignored_fields),
-            flush=True,
-        )
-
-    return args, {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "resume_dir": str(args.resume.resolve()),
-        "explicit_fields": sorted(explicit & set(_RESUMABLE_CONFIG_FIELDS)),
-        "ignored_fields": ignored_fields,
-        "overrides": overrides,
-        "effective_config": _serialize_args(args),
-    }
-
-
-# Held per-process so re-entrant init_run calls (tests, resume after fresh
-# init in one process) do not deadlock on their own lock.
-_RUN_LOCK_FDS: dict[Path, int] = {}
-
-
-def _acquire_run_lock(run_dir: Path) -> None:
-    """Hold an exclusive advisory lock on the run dir for process lifetime.
-
-    Prevents a second autoresearch process from resuming/initializing the
-    same run concurrently and interleaving state.json / history writes.
-    """
-    key = run_dir.resolve()
-    if key in _RUN_LOCK_FDS:
-        return
-    import fcntl  # POSIX; the loop already assumes a Unix environment
-
-    fd = os.open(key / ".autoresearch.lock", os.O_RDWR | os.O_CREAT, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
-        os.close(fd)
-        raise RuntimeError(
-            f"Run directory is locked by another autoresearch process: {key}. "
-            "Stop that process before resuming this run."
-        ) from exc
-    _RUN_LOCK_FDS[key] = fd
-
 
 def init_run(
     *,
@@ -633,175 +441,45 @@ def _reusable_prev_post(
     return prev_post
 
 
-def _load_or_create_iteration_journal(
-    *,
-    iter_dir: Path,
-    iteration: int,
-    train_data_path: Path,
-    config: dict[str, Any],
-    state: LoopState,
-) -> tuple[Path, dict[str, Any]]:
-    """Create a durable phase journal or validate an interrupted iteration."""
-    journal_path = iter_dir / "iteration_state.json"
-    before_path = iter_dir / "train_data_before.csv"
-    if journal_path.is_file():
-        journal = load_json(journal_path)
-        if not isinstance(journal, dict) or journal.get("iteration") != iteration:
-            raise ValueError(f"Invalid iteration journal: {journal_path}")
-        if journal.get("config") != config:
-            raise ValueError(
-                f"Cannot change configuration while resuming incomplete iteration "
-                f"{iteration}; finish it with the original settings first"
-            )
-        if not before_path.is_file():
-            raise FileNotFoundError(
-                f"Missing pre-iteration train snapshot required for safe resume: {before_path}"
-            )
-        return journal_path, journal
+@dataclass
+class IterationContext:
+    """Everything one iteration's phases share (paths, journal, config)."""
 
-    unexpected = [
-        path.name
-        for path in iter_dir.iterdir()
-        if path.name != before_path.name
-        and not (path.name.startswith(".") and path.name.endswith(".tmp"))
-    ]
-    if unexpected:
-        raise RuntimeError(
-            f"Refusing to reuse unjournaled iteration directory {iter_dir}; "
-            f"found {sorted(unexpected)}"
-        )
-    if not before_path.is_file():
-        write_math_csv(before_path, load_math_csv(train_data_path))
-    journal = {
-        "iteration": iteration,
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "config": config,
-        "policy_before": {
-            "state_path": state.last_policy_state_path,
-            "sampler_path": state.last_policy_sampler_path,
-            "judge_model_path": state.last_judge_model_path,
-        },
-        "train_data_before": str(before_path),
-        "completed_phases": [],
-        "phase_data": {},
-    }
-    save_json(journal_path, journal)
-    return journal_path, journal
+    state: LoopState
+    progress: ProgressTracker
+    cfg: dict[str, Any]
+    eval_ci: EvalCIConfig
+    run_dir: Path
+    it: int
+    iter_dir: Path
+    train_data_path: Path
+    journal_path: Path
+    journal: dict[str, Any]
+    eval_train_sample: Path
+    eval_heldout_sample: Path
+    heldout_path: Path
+    heldout_keys: set[str] = field(default_factory=set)
+    generated_path: Path | None = None
+    validated_path: Path | None = None
+    audit_path: Path | None = None
+    new_examples_added: int = 0
+    train_meta: dict | None = None
+    train_log: Path | None = None
 
 
-def _phase_done(journal: dict[str, Any], phase: str) -> bool:
-    return phase in journal.get("completed_phases", [])
-
-
-def _phase_data(journal: dict[str, Any], phase: str) -> dict[str, Any]:
-    raw = journal.get("phase_data", {}).get(phase, {})
-    return raw if isinstance(raw, dict) else {}
-
-
-def _mark_phase(
-    journal_path: Path,
-    journal: dict[str, Any],
-    phase: str,
-    **data: Any,
-) -> None:
-    phases = journal.setdefault("completed_phases", [])
-    if phase not in phases:
-        phases.append(phase)
-    journal.setdefault("phase_data", {})[phase] = {
-        "completed_at": datetime.now(timezone.utc).isoformat(),
-        **data,
-    }
-    save_json(journal_path, journal)
-
-
-def _upsert_history_file(path: Path, record: dict[str, Any]) -> None:
-    """Atomically add/replace one iteration record, tolerating a torn last line."""
-    records: list[dict[str, Any]] = []
-    lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
-    nonempty = [(line_number, line) for line_number, line in enumerate(lines, 1) if line.strip()]
-    for index, (line_number, line) in enumerate(nonempty):
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError as exc:
-            if index == len(nonempty) - 1:
-                break
-            raise ValueError(f"Invalid JSON at {path}:{line_number}") from exc
-        if not isinstance(parsed, dict):
-            raise ValueError(f"Expected JSON object at {path}:{line_number}")
-        records.append(parsed)
-
-    iteration = record["iteration"]
-    for index, existing in enumerate(records):
-        if existing.get("iteration") == iteration:
-            records[index] = record
-            break
-    else:
-        records.append(record)
-    write_jsonl(path, records)
-
-
-def _upsert_state_history(
-    history: list[dict[str, Any]],
-    record: dict[str, Any],
-) -> None:
-    iteration = record["iteration"]
-    for index, existing in enumerate(history):
-        if existing.get("iteration") == iteration:
-            history[index] = record
-            return
-    history.append(record)
-
-
-def run_iteration(
+def begin_iteration(
     state: LoopState,
     progress: ProgressTracker,
-    *,
-    model: str,
-    gen_target: int,
-    seed_samples: int,
-    variations_per_batch: int,
-    seeds_per_batch: int,
-    eval_sample_size: int,
-    train_max_steps: int,
-    groups_per_batch: int,
-    group_size: int,
-    save_every: int,
-    eval_every: int,
-    learning_rate: float,
-    lora_rank: int,
-    rng_seed: int,
-    skip_generate: bool,
-    skip_train: bool,
-    skip_high_eval: bool,
-    gen_temperature: float,
-    eval_ci: EvalCIConfig | None = None,
-) -> LoopState:
-    """Execute one full autoresearch iteration; mutate and return state."""
-    if eval_ci is None:
-        eval_ci = EvalCIConfig()
+    cfg: dict[str, Any],
+    eval_ci: EvalCIConfig,
+) -> IterationContext:
+    """Open (or re-open) this iteration: journal, dirs, samples, leak guards."""
     run_dir = Path(state.run_dir)
     it = state.iteration
     train_data_path = Path(state.train_data)
     iter_dir = ensure_dir(run_dir / f"iter_{it:03d}")
     iteration_config = {
-        "model": model,
-        "gen_target": gen_target,
-        "seed_samples": seed_samples,
-        "variations_per_batch": variations_per_batch,
-        "seeds_per_batch": seeds_per_batch,
-        "eval_sample_size": eval_sample_size,
-        "train_max_steps": train_max_steps,
-        "groups_per_batch": groups_per_batch,
-        "group_size": group_size,
-        "save_every": save_every,
-        "eval_every": eval_every,
-        "learning_rate": learning_rate,
-        "lora_rank": lora_rank,
-        "rng_seed": rng_seed,
-        "skip_generate": skip_generate,
-        "skip_train": skip_train,
-        "skip_high_eval": skip_high_eval,
-        "gen_temperature": gen_temperature,
+        **cfg,
         "target_ci_pp": eval_ci.target_ci_pp,
         "p_value": eval_ci.p_value,
         "eval_batch_size": eval_ci.batch_size,
@@ -810,9 +488,11 @@ def run_iteration(
     journal_path, journal = _load_or_create_iteration_journal(
         iter_dir=iter_dir,
         iteration=it,
-        train_data_path=train_data_path,
         config=iteration_config,
         state=state,
+        ensure_before=lambda before_path: write_math_csv(
+            before_path, load_math_csv(train_data_path)
+        ),
     )
     progress.set_phase("iteration_start", f"Starting iteration {it}", iteration=it)
     progress.set_paths(**{f"iter_{it:03d}": iter_dir})
@@ -833,12 +513,45 @@ def run_iteration(
     if heldout_path.is_file():
         heldout_keys = operation_keys(load_math_csv(heldout_path))
 
-    # ------------------------------------------------------------------
-    # 1) Data generation (train pool only — never held-out)
-    # ------------------------------------------------------------------
-    generated_path = iter_dir / "generated.csv"
-    validated_path = iter_dir / "validated.csv"
-    audit_path = iter_dir / "validation_audit.jsonl"
+    return IterationContext(
+        state=state,
+        progress=progress,
+        cfg=cfg,
+        eval_ci=eval_ci,
+        run_dir=run_dir,
+        it=it,
+        iter_dir=iter_dir,
+        train_data_path=train_data_path,
+        journal_path=journal_path,
+        journal=journal,
+        eval_train_sample=eval_train_sample,
+        eval_heldout_sample=eval_heldout_sample,
+        heldout_path=heldout_path,
+        heldout_keys=heldout_keys,
+        generated_path=iter_dir / "generated.csv",
+        validated_path=iter_dir / "validated.csv",
+        audit_path=iter_dir / "validation_audit.jsonl",
+    )
+
+
+def generate_and_validate(ctx: IterationContext) -> None:
+    """Phases 1-2: grow the train pool with validated generations (or skip)."""
+    progress, journal, journal_path = ctx.progress, ctx.journal, ctx.journal_path
+    iter_dir, it = ctx.iter_dir, ctx.it
+    train_data_path = ctx.train_data_path
+    heldout_keys, heldout_path = ctx.heldout_keys, ctx.heldout_path
+    generated_path = ctx.generated_path
+    validated_path = ctx.validated_path
+    audit_path = ctx.audit_path
+    cfg = ctx.cfg
+    model = cfg["model"]
+    gen_target = cfg["gen_target"]
+    seed_samples = cfg["seed_samples"]
+    variations_per_batch = cfg["variations_per_batch"]
+    seeds_per_batch = cfg["seeds_per_batch"]
+    gen_temperature = cfg["gen_temperature"]
+    rng_seed = cfg["rng_seed"]
+    skip_generate = cfg["skip_generate"]
     new_examples_added = 0
 
     if skip_generate:
@@ -984,6 +697,20 @@ def run_iteration(
                 flush=True,
             )
 
+    ctx.new_examples_added = new_examples_added
+
+
+def evaluate_pre(ctx: IterationContext) -> tuple[DifferentialMetrics, DifferentialMetrics]:
+    """Phase 3: pre-train dual evals (carried forward when nothing changed)."""
+    state, progress = ctx.state, ctx.progress
+    journal, journal_path = ctx.journal, ctx.journal_path
+    run_dir, it, iter_dir = ctx.run_dir, ctx.it, ctx.iter_dir
+    eval_train_sample = ctx.eval_train_sample
+    eval_heldout_sample = ctx.eval_heldout_sample
+    model = ctx.cfg["model"]
+    skip_high_eval = ctx.cfg["skip_high_eval"]
+    eval_ci = ctx.eval_ci
+
     if not eval_train_sample.is_file():
         raise FileNotFoundError(
             f"Missing train-seed eval sample: {eval_train_sample}. "
@@ -1080,9 +807,27 @@ def run_iteration(
             )
             _mark_phase(journal_path, journal, "eval_pre")
 
-    # ------------------------------------------------------------------
-    # 4) Train (instant policy from last checkpoint, high judge)
-    # ------------------------------------------------------------------
+    return pre_train, pre_heldout
+
+
+def train_policy(ctx: IterationContext) -> None:
+    """Phase 4: RL train step from the last checkpoint; advance policy pointers."""
+    state, progress = ctx.state, ctx.progress
+    journal, journal_path = ctx.journal, ctx.journal_path
+    iter_dir, it = ctx.iter_dir, ctx.it
+    train_data_path = ctx.train_data_path
+    cfg = ctx.cfg
+    model = cfg["model"]
+    train_max_steps = cfg["train_max_steps"]
+    groups_per_batch = cfg["groups_per_batch"]
+    group_size = cfg["group_size"]
+    save_every = cfg["save_every"]
+    eval_every = cfg["eval_every"]
+    learning_rate = cfg["learning_rate"]
+    lora_rank = cfg["lora_rank"]
+    rng_seed = cfg["rng_seed"]
+    skip_train = cfg["skip_train"]
+
     train_meta: dict | None = None
     train_log = ensure_dir(iter_dir / "train")
     if _phase_done(journal, "train"):
@@ -1177,9 +922,25 @@ def run_iteration(
             last_judge_model_path=state.last_judge_model_path,
         )
 
-    # ------------------------------------------------------------------
-    # 5) Post-train evals — train-seed + held-out
-    # ------------------------------------------------------------------
+    ctx.train_meta = train_meta
+    ctx.train_log = train_log
+
+
+def evaluate_post(
+    ctx: IterationContext,
+    pre_train: DifferentialMetrics,
+    pre_heldout: DifferentialMetrics,
+) -> tuple[DifferentialMetrics, DifferentialMetrics]:
+    """Phase 5: post-train dual evals with the fresh checkpoint."""
+    state, progress = ctx.state, ctx.progress
+    journal, journal_path = ctx.journal, ctx.journal_path
+    iter_dir = ctx.iter_dir
+    eval_train_sample = ctx.eval_train_sample
+    eval_heldout_sample = ctx.eval_heldout_sample
+    model = ctx.cfg["model"]
+    skip_high_eval = ctx.cfg["skip_high_eval"]
+    eval_ci = ctx.eval_ci
+
     if _phase_done(journal, "eval_post"):
         post_train, post_heldout = _load_dual_evals(tag="post", iter_dir=iter_dir)
         print("[eval/post] reusing completed eval artifacts", flush=True)
@@ -1203,6 +964,28 @@ def run_iteration(
             prev_heldout_instant=pre_heldout,
         )
         _mark_phase(journal_path, journal, "eval_post")
+
+    return post_train, post_heldout
+
+
+def finish_iteration(
+    ctx: IterationContext,
+    pre_train: DifferentialMetrics,
+    pre_heldout: DifferentialMetrics,
+    post_train: DifferentialMetrics,
+    post_heldout: DifferentialMetrics,
+) -> LoopState:
+    """Phase 6: deltas, durable metrics/history, commit the iteration."""
+    state, progress = ctx.state, ctx.progress
+    journal, journal_path = ctx.journal, ctx.journal_path
+    run_dir, it, iter_dir = ctx.run_dir, ctx.it, ctx.iter_dir
+    heldout_keys, heldout_path = ctx.heldout_keys, ctx.heldout_path
+    generated_path = ctx.generated_path
+    validated_path = ctx.validated_path
+    new_examples_added = ctx.new_examples_added
+    train_meta, train_log = ctx.train_meta, ctx.train_log
+    skip_high_eval = ctx.cfg["skip_high_eval"]
+    eval_ci = ctx.eval_ci
 
     train_instant_delta = post_train.instant.accuracy - pre_train.instant.accuracy
     heldout_instant_delta = (
@@ -1368,422 +1151,3 @@ def run_iteration(
     )
     save_state(run_dir / "state.json", state)
     return state
-
-
-def build_parser(
-    *,
-    suppress_defaults: bool = False,
-    loop_cfg: LoopConfig | None = None,
-) -> argparse.ArgumentParser:
-    """Build the CLI parser.
-
-    With ``suppress_defaults=True`` every default becomes ``argparse.SUPPRESS``
-    so a second parse reveals exactly which options the user typed (used for
-    resume-override detection). Defaults come from ``loop_config.toml`` when present.
-    """
-    cfg = loop_cfg or load_loop_config()
-    p = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p.add_argument(
-        "--config",
-        type=Path,
-        default=resolve_config_path(),
-        help=f"Path to loop_config.toml (default: {resolve_config_path()})",
-    )
-    p.add_argument(
-        "--seed-data",
-        type=Path,
-        default=DEFAULT_SEED_DATA,
-        help=f"Initial math CSV (default: {DEFAULT_SEED_DATA})",
-    )
-    p.add_argument(
-        "--runs-root",
-        type=Path,
-        default=DEFAULT_RUNS_ROOT,
-        help=f"Parent directory for runs (default: {DEFAULT_RUNS_ROOT})",
-    )
-    p.add_argument("--run-name", default=None, help="Optional run folder name")
-    p.add_argument(
-        "--resume",
-        type=Path,
-        default=None,
-        help="Resume an existing run directory (reads state.json)",
-    )
-    p.add_argument("--model", default=DEFAULT_MODEL)
-    p.add_argument("--max-iters", type=int, default=cfg.stop.max_iters)
-    p.add_argument(
-        "--marginal-delta",
-        type=float,
-        default=cfg.stop.marginal_delta,
-        help=(
-            "Stop when instant accuracy gain is below this fraction "
-            f"(default from config: {cfg.stop.marginal_delta})"
-        ),
-    )
-    p.add_argument(
-        "--marginal-streak",
-        type=int,
-        default=cfg.stop.marginal_streak,
-        help=(
-            "Consecutive marginal iterations required to stop "
-            f"(default from config: {cfg.stop.marginal_streak})"
-        ),
-    )
-    p.add_argument(
-        "--noise-z",
-        type=float,
-        default=cfg.stop.noise_z,
-        help=(
-            "An instant-accuracy gain only counts as progress when it also "
-            "exceeds noise_z × the binomial standard error of the pre/post "
-            "comparison. 0 disables the noise band "
-            f"(default from config: {cfg.stop.noise_z})"
-        ),
-    )
-    p.add_argument(
-        "--gen-target",
-        "--step-size",
-        type=int,
-        default=cfg.generation.step_size,
-        dest="gen_target",
-        help=(
-            "New data rows to aim for each iteration (generation step size). "
-            f"Default from config generation.step_size: {cfg.generation.step_size}"
-        ),
-    )
-    p.add_argument("--seed-samples", type=int, default=cfg.generation.seed_samples)
-    p.add_argument(
-        "--variations-per-batch",
-        type=int,
-        default=cfg.generation.variations_per_batch,
-    )
-    p.add_argument("--seeds-per-batch", type=int, default=cfg.generation.seeds_per_batch)
-    p.add_argument("--gen-temperature", type=float, default=cfg.generation.temperature)
-    p.add_argument(
-        "--eval-sample-size",
-        type=int,
-        default=max(cfg.eval.pool_size_heldout, cfg.eval.pool_size_train_seed),
-        help=(
-            "Max ops reserved for each eval pool at run start "
-            f"(default max of config pools: "
-            f"{max(cfg.eval.pool_size_heldout, cfg.eval.pool_size_train_seed)})"
-        ),
-    )
-    p.add_argument(
-        "--target-ci-pp",
-        type=float,
-        default=cfg.eval.target_ci_pp,
-        help=(
-            "Target CI half-width in percentage points for adaptive eval "
-            f"(default from config: {cfg.eval.target_ci_pp} @ p<{cfg.eval.p_value})"
-        ),
-    )
-    p.add_argument(
-        "--p-value",
-        type=float,
-        default=cfg.eval.p_value,
-        help=f"α for CI / significance (default from config: {cfg.eval.p_value})",
-    )
-    p.add_argument(
-        "--eval-batch-size",
-        type=int,
-        default=cfg.eval.batch_size,
-        help=f"Adaptive eval growth step (default: {cfg.eval.batch_size})",
-    )
-    p.add_argument(
-        "--eval-max-sample-size",
-        type=int,
-        default=cfg.eval.max_sample_size,
-        help=f"Hard cap on adaptive eval n (default: {cfg.eval.max_sample_size})",
-    )
-    p.add_argument(
-        "--heldout-fraction",
-        type=float,
-        default=cfg.data.heldout_fraction,
-        help=(
-            "Fraction of seed carved into a never-train held-out test set "
-            f"(default from config: {cfg.data.heldout_fraction}). Progress evals "
-            "run on both a train-seed sample and this held-out sample."
-        ),
-    )
-    p.add_argument("--train-max-steps", type=int, default=cfg.train.max_steps)
-    p.add_argument(
-        "--groups-per-batch",
-        type=int,
-        default=cfg.train.groups_per_batch,
-    )
-    p.add_argument("--group-size", type=int, default=cfg.train.group_size)
-    p.add_argument("--save-every", type=int, default=cfg.train.save_every)
-    p.add_argument("--eval-every", type=int, default=cfg.train.eval_every)
-    p.add_argument("--learning-rate", type=float, default=cfg.train.learning_rate)
-    p.add_argument("--lora-rank", type=int, default=cfg.train.lora_rank)
-    p.add_argument("--rng-seed", type=int, default=0)
-    p.add_argument(
-        "--force",
-        action="store_true",
-        help=(
-            "When resuming a run that early-stopped, clear the stop decision "
-            "and continue iterating (otherwise resume is a no-op)"
-        ),
-    )
-    p.add_argument(
-        "--skip-generate",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Skip data generation/validation (train/eval only)",
-    )
-    p.add_argument(
-        "--skip-train",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Skip Tinker training (eval-only loop for debugging)",
-    )
-    p.add_argument(
-        "--skip-high-eval",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Only score instant on the eval sample (cheaper)",
-    )
-    if suppress_defaults:
-        for action in p._actions:
-            if action.dest != "help":
-                action.default = argparse.SUPPRESS
-    return p
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    # First pass: discover --config if present, then rebuild defaults from it.
-    raw = list(argv) if argv is not None else sys.argv[1:]
-    pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument("--config", type=Path, default=None)
-    pre_args, _ = pre.parse_known_args(raw)
-    cfg = load_loop_config(pre_args.config) if pre_args.config else load_loop_config()
-    return build_parser(loop_cfg=cfg).parse_args(raw)
-
-
-def eval_ci_from_args(args: argparse.Namespace, base: LoopConfig | None = None) -> EvalCIConfig:
-    """Merge CLI eval CI knobs onto the loaded config section."""
-    cfg = base or load_loop_config(getattr(args, "config", None))
-    e = cfg.eval
-    return EvalCIConfig(
-        target_ci_pp=float(args.target_ci_pp),
-        p_value=float(args.p_value),
-        batch_size=int(args.eval_batch_size),
-        min_sample_size=min(int(args.eval_batch_size), int(args.eval_max_sample_size)),
-        max_sample_size=int(args.eval_max_sample_size),
-        compare_instant_vs_high=e.compare_instant_vs_high and not args.skip_high_eval,
-        compare_instant_vs_previous=e.compare_instant_vs_previous,
-        require_heldout_ci=e.require_heldout_ci,
-        require_train_seed_ci=e.require_train_seed_ci,
-        pool_size_heldout=max(e.pool_size_heldout, int(args.eval_sample_size)),
-        pool_size_train_seed=max(e.pool_size_train_seed, int(args.eval_sample_size)),
-    )
-
-
-def validate_args(args: argparse.Namespace) -> None:
-    positive = {
-        "max_iters": args.max_iters,
-        "marginal_streak": args.marginal_streak,
-        "gen_target": args.gen_target,
-        "seed_samples": args.seed_samples,
-        "variations_per_batch": args.variations_per_batch,
-        "seeds_per_batch": args.seeds_per_batch,
-        "eval_sample_size": args.eval_sample_size,
-        "eval_batch_size": args.eval_batch_size,
-        "eval_max_sample_size": args.eval_max_sample_size,
-        "target_ci_pp": args.target_ci_pp,
-        "train_max_steps": args.train_max_steps,
-        "groups_per_batch": args.groups_per_batch,
-        "group_size": args.group_size,
-        "save_every": args.save_every,
-        "eval_every": args.eval_every,
-        "learning_rate": args.learning_rate,
-        "lora_rank": args.lora_rank,
-    }
-    invalid = {name: value for name, value in positive.items() if value <= 0}
-    if invalid:
-        raise ValueError(f"Expected positive configuration values, got {invalid}")
-    if args.marginal_delta < 0:
-        raise ValueError("marginal_delta must be >= 0")
-    if args.noise_z < 0:
-        raise ValueError("noise_z must be >= 0")
-    if not 0.0 < args.p_value < 1.0:
-        raise ValueError("p_value must be in (0, 1)")
-    if not args.skip_train and args.save_every > args.train_max_steps:
-        raise ValueError(
-            f"save_every ({args.save_every}) must be <= train_max_steps "
-            f"({args.train_max_steps}), otherwise training saves no checkpoint"
-        )
-    if args.gen_temperature < 0:
-        raise ValueError("gen_temperature must be >= 0")
-    if not 0.0 < args.heldout_fraction < 1.0:
-        raise ValueError("heldout_fraction must be in (0, 1)")
-
-
-def main(argv: list[str] | None = None) -> None:
-    raw_argv = list(argv) if argv is not None else sys.argv[1:]
-    args = parse_args(raw_argv)
-    args, resume_record = resolve_resume_config(args, argv=raw_argv)
-    validate_args(args)
-    eval_ci = eval_ci_from_args(args)
-    print(
-        f"Config: step_size/gen_target={args.gen_target} | "
-        f"eval CI ±{args.target_ci_pp}pp @ p<{args.p_value} | "
-        f"batch={args.eval_batch_size} max_n={args.eval_max_sample_size} | "
-        f"source={getattr(args, 'config', None)}",
-        flush=True,
-    )
-    for warning in check_model_consistency(args.model):
-        print(f"WARNING: {warning}", flush=True)
-    run_dir, state, progress = init_run(
-        runs_root=args.runs_root,
-        run_name=args.run_name,
-        seed_data=args.seed_data,
-        resume_dir=args.resume,
-        heldout_fraction=args.heldout_fraction,
-        eval_sample_size=args.eval_sample_size,
-        rng_seed=args.rng_seed,
-    )
-    state_path = run_dir / "state.json"
-
-    if resume_record is None:
-        # Immutable original configuration. Resume invocations are audited below.
-        save_json(run_dir / "config.json", _serialize_args(args))
-    else:
-        resume_record["iteration"] = state.iteration
-        resume_history = run_dir / "resume_history.jsonl"
-        append_jsonl(resume_history, resume_record)
-        progress.set_paths(resume_history=resume_history)
-
-    if state.stopped and not args.force:
-        print(
-            f"\nRun is already stopped: {state.stop_reason}\n"
-            "Resume with --force to clear the stop decision and continue.",
-            flush=True,
-        )
-        return
-    if state.stopped and args.force:
-        print(
-            f"\n--force: clearing early stop ({state.stop_reason})",
-            flush=True,
-        )
-        state.stopped = False
-        state.stop_reason = None
-        save_state(state_path, state)
-        progress.update(stopped=False, stop_reason=None)
-        progress.event("force_resume", "cleared early stop via --force")
-
-    # Derive the streak from durable history instead of trusting a possibly stale
-    # counter written just before an interruption. Skipped under --force so a
-    # forced run gets to attempt at least one new iteration.
-    state.marginal_streak = marginal_improvement_streak(
-        state.metrics_history,
-        min_delta=args.marginal_delta,
-        noise_z=args.noise_z,
-    )
-    if (
-        not args.force
-        and not state.stopped
-        and state.marginal_streak >= args.marginal_streak
-    ):
-        reason = (
-            f"held-out instant accuracy gains below progress threshold "
-            f"(marginal_delta={args.marginal_delta}, noise_z={args.noise_z}) "
-            f"for {args.marginal_streak} consecutive iterations"
-        )
-        state.stopped = True
-        state.stop_reason = reason
-        save_state(state_path, state)
-        progress.mark_stopped(reason)
-
-    start_iter = state.iteration
-    end_iter = start_iter + args.max_iters
-    if args.resume is not None and not state.stopped and start_iter > 0:
-        print(
-            f"Resume extends the run by {args.max_iters} iteration(s): "
-            f"{start_iter} → {end_iter} (use --max-iters to change)",
-            flush=True,
-        )
-    while state.iteration < end_iter and not state.stopped:
-        state = run_iteration(
-            state,
-            progress,
-            model=args.model,
-            gen_target=args.gen_target,
-            seed_samples=args.seed_samples,
-            variations_per_batch=args.variations_per_batch,
-            seeds_per_batch=args.seeds_per_batch,
-            eval_sample_size=args.eval_sample_size,
-            train_max_steps=args.train_max_steps,
-            groups_per_batch=args.groups_per_batch,
-            group_size=args.group_size,
-            save_every=args.save_every,
-            eval_every=args.eval_every,
-            learning_rate=args.learning_rate,
-            lora_rank=args.lora_rank,
-            rng_seed=args.rng_seed,
-            skip_generate=args.skip_generate,
-            skip_train=args.skip_train,
-            skip_high_eval=args.skip_high_eval,
-            gen_temperature=args.gen_temperature,
-            eval_ci=eval_ci,
-        )
-        state.marginal_streak = marginal_improvement_streak(
-            state.metrics_history,
-            min_delta=args.marginal_delta,
-            noise_z=args.noise_z,
-        )
-        if state.marginal_streak:
-            progress.event(
-                "marginal",
-                f"streak {state.marginal_streak}/{args.marginal_streak}",
-                streak=state.marginal_streak,
-            )
-            print(
-                f"Marginal improvement streak: "
-                f"{state.marginal_streak}/{args.marginal_streak}",
-                flush=True,
-            )
-        if state.marginal_streak >= args.marginal_streak:
-            reason = (
-                f"held-out instant accuracy gains below progress threshold "
-                f"(marginal_delta={args.marginal_delta}, noise_z={args.noise_z}) "
-                f"for {args.marginal_streak} consecutive iterations"
-            )
-            state.stopped = True
-            state.stop_reason = reason
-            progress.mark_stopped(reason)
-            print(f"\nStopping: {reason}", flush=True)
-            save_state(state_path, state)
-            break
-        save_state(state_path, state)
-
-    if not state.stopped:
-        progress.set_phase(
-            "completed",
-            f"Finished {state.iteration - start_iter} iteration(s)",
-            iteration=state.iteration,
-        )
-        progress.update(stopped=False, stop_reason=None)
-
-    print(
-        f"\nDone. iterations completed={state.iteration - start_iter} "
-        f"total_iteration_index={state.iteration} run_dir={run_dir}",
-        flush=True,
-    )
-    print(f"Dashboard poll targets: {run_dir}/status.json  {run_dir}/events.jsonl", flush=True)
-    if state.metrics_history:
-        last = state.metrics_history[-1]
-        post = last.get("post", {})
-        instant = post.get("instant", {})
-        print(
-            f"Latest instant accuracy: {instant.get('accuracy')} "
-            f"({instant.get('correct')}/{instant.get('total')})",
-            flush=True,
-        )
-
-
-if __name__ == "__main__":
-    main()

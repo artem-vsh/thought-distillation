@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+import os
+
 from core.io import load_json, save_json
 
 
@@ -51,3 +53,33 @@ def load_state(path: Path) -> LoopState:
 
 def save_state(path: Path, state: LoopState) -> None:
     save_json(path, state.to_dict())
+
+
+
+
+# Held per-process so re-entrant init_run calls (tests, resume after fresh
+# init in one process) do not deadlock on their own lock.
+_RUN_LOCK_FDS: dict[Path, int] = {}
+
+
+def _acquire_run_lock(run_dir: Path) -> None:
+    """Hold an exclusive advisory lock on the run dir for process lifetime.
+
+    Prevents a second autoresearch process from resuming/initializing the
+    same run concurrently and interleaving state.json / history writes.
+    """
+    key = run_dir.resolve()
+    if key in _RUN_LOCK_FDS:
+        return
+    import fcntl  # POSIX; the loop already assumes a Unix environment
+
+    fd = os.open(key / ".autoresearch.lock", os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        os.close(fd)
+        raise RuntimeError(
+            f"Run directory is locked by another autoresearch process: {key}. "
+            "Stop that process before resuming this run."
+        ) from exc
+    _RUN_LOCK_FDS[key] = fd

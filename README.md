@@ -15,7 +15,7 @@ pip install -r requirements.txt
 # Also put TINKER_API_KEY in the env or ~/.secrets/tinker.env
 
 # Edit loop_config.toml, then:
-python -m autoresearch …
+python loop.py …
 python -m dashboard --open
 ```
 
@@ -136,14 +136,26 @@ teacher.
 
 ## Pipeline (per iteration)
 
-| Step | Module | What it does |
-|------|--------|----------------|
-| 1. Generate | `generate_data.py` | High-reasoning variations of seed/train examples |
-| 2. Validate | `validate_data.py` | `test_arithmetic.evaluate_operation` + high keep/discard |
-| 3. Eval pre | `run_evals.py` | `ask_arithmetic` + `test_arithmetic` → gap |
-| 4. Train | `train_step.py` | `train_math_llm_judge` resume last ckpt |
-| 5. Eval post | `run_evals.py` | Instant uses new `sampler_path`; save Δ |
-| 6. Stop | `autoresearch.py` | Marginal instant Δ for N iters |
+| Step | Primitive (`prepare.py`) | Implementation | What it does |
+|------|--------------------------|----------------|----------------|
+| 1. Generate | `generate_and_validate` | `mathtask/generate_data.py` | High-reasoning variations of seed/train examples |
+| 2. Validate | `generate_and_validate` | `mathtask/validate_data.py` | `evaluate_operation` + high keep/discard |
+| 3. Eval pre | `evaluate_pre` | `mathtask/sequential_eval.py` | Adaptive-CI dual eval (carry-forward when unchanged) |
+| 4. Train | `train_policy` | `mathtask/train_step.py` | `train_math_llm_judge` resume last ckpt |
+| 5. Eval post | `evaluate_post` | `mathtask/sequential_eval.py` | Instant uses new `sampler_path`; save Δ |
+| 6. Stop | `loop.py` | `core/stopping.py` | Marginal instant Δ for N iters |
+
+## Layout
+
+```
+loop.py            # the research loop — the file you iterate on
+prepare.py         # frozen harness: run setup, eval/train primitives, journaling
+program.md         # goal, metric, what may vary vs what is frozen
+loop_config.toml   # knobs (CLI overrides)
+core/              # task-agnostic plumbing: cli, io, journal, history, progress, stats
+mathtask/          # arithmetic task: vendored ask/test/train scripts, gen/validate/eval wiring
+dashboard/         # live run viewer;  tests/  scripts/  data/
+```
 
 ## Quick start
 
@@ -151,7 +163,7 @@ teacher.
 cd loop
 source .venv/bin/activate   # after pip install -r requirements.txt
 
-python -m autoresearch \
+python loop.py \
   --seed-data data/arithmetic_operations.csv \
   --max-iters 5 \
   --gen-target 100 \
@@ -169,7 +181,7 @@ Run names are exclusive: an existing `--run-name` is never overwritten. Resume
 an existing run explicitly:
 
 ```bash
-python -m autoresearch --resume output/autoresearch/<run-name>
+python loop.py --resume output/autoresearch/<run-name>
 ```
 
 Resume restores the original `config.json`. Only options explicitly supplied

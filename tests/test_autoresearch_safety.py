@@ -7,7 +7,10 @@ from pathlib import Path
 
 import pytest
 
-import autoresearch
+import loop
+import prepare
+from core import cli
+from core import runstate
 from core.io import ensure_dir, load_json, save_json
 from core.metrics import DifferentialMetrics, EvalMetrics
 from mathtask.dataset import MathExample, write_math_csv
@@ -50,7 +53,7 @@ def _diff(accuracy: float, model_path: str | None = None) -> DifferentialMetrics
 def test_new_run_refuses_existing_name(tmp_path: Path) -> None:
     seed = _seed_csv(tmp_path / "seed.csv")
     runs_root = tmp_path / "runs"
-    autoresearch.init_run(
+    prepare.init_run(
         runs_root=runs_root,
         run_name="same-name",
         seed_data=seed,
@@ -59,7 +62,7 @@ def test_new_run_refuses_existing_name(tmp_path: Path) -> None:
     )
 
     with pytest.raises(FileExistsError, match="Use --resume"):
-        autoresearch.init_run(
+        prepare.init_run(
             runs_root=runs_root,
             run_name="same-name",
             seed_data=seed,
@@ -72,7 +75,7 @@ def test_resume_restores_saved_config_and_audits_explicit_override(
     tmp_path: Path,
 ) -> None:
     run_dir = ensure_dir(tmp_path / "run")
-    original = autoresearch.parse_args(
+    original = cli.parse_args(
         [
             "--model",
             "saved/model",
@@ -83,10 +86,10 @@ def test_resume_restores_saved_config_and_audits_explicit_override(
             "--skip-train",
         ]
     )
-    original_payload = autoresearch._serialize_args(original)
+    original_payload = cli._serialize_args(original)
     save_json(run_dir / "config.json", original_payload)
 
-    resumed = autoresearch.parse_args(
+    resumed = cli.parse_args(
         [
             "--resume",
             str(run_dir),
@@ -95,7 +98,7 @@ def test_resume_restores_saved_config_and_audits_explicit_override(
             "--no-skip-train",
         ]
     )
-    effective, audit = autoresearch.resolve_resume_config(
+    effective, audit = cli.resolve_resume_config(
         resumed,
         argv=[
             "--resume",
@@ -118,11 +121,11 @@ def test_resume_restores_saved_config_and_audits_explicit_override(
     }
     assert load_json(run_dir / "config.json") == original_payload
 
-    incompatible = autoresearch.parse_args(
+    incompatible = cli.parse_args(
         ["--resume", str(run_dir), "--eval-sample-size", "3"]
     )
     with pytest.raises(ValueError, match="eval_sample_size is fixed"):
-        autoresearch.resolve_resume_config(
+        cli.resolve_resume_config(
             incompatible,
             argv=["--resume", str(run_dir), "--eval-sample-size", "3"],
         )
@@ -131,12 +134,12 @@ def test_resume_restores_saved_config_and_audits_explicit_override(
 def test_resume_detects_abbreviated_and_ignored_options(tmp_path: Path) -> None:
     """Argparse abbreviations must register as explicit overrides on resume."""
     run_dir = ensure_dir(tmp_path / "run")
-    original = autoresearch.parse_args(["--max-iters", "7"])
-    save_json(run_dir / "config.json", autoresearch._serialize_args(original))
+    original = cli.parse_args(["--max-iters", "7"])
+    save_json(run_dir / "config.json", cli._serialize_args(original))
 
     argv = ["--resume", str(run_dir), "--max-it", "2", "--seed-data", "x.csv"]
-    resumed = autoresearch.parse_args(argv)
-    effective, audit = autoresearch.resolve_resume_config(resumed, argv=argv)
+    resumed = cli.parse_args(argv)
+    effective, audit = cli.resolve_resume_config(resumed, argv=argv)
 
     # "--max-it" is an unambiguous abbreviation of --max-iters: it must win.
     assert effective.max_iters == 2
@@ -151,7 +154,7 @@ def test_stopped_run_requires_force_to_continue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed = _seed_csv(tmp_path / "seed.csv")
-    run_dir, state, _progress = autoresearch.init_run(
+    run_dir, state, _progress = prepare.init_run(
         runs_root=tmp_path / "runs",
         run_name="stopped-run",
         seed_data=seed,
@@ -161,7 +164,7 @@ def test_stopped_run_requires_force_to_continue(
     # Original config is written by main() on fresh runs; resume needs it.
     save_json(
         run_dir / "config.json",
-        autoresearch._serialize_args(autoresearch.parse_args(["--max-iters", "2"])),
+        cli._serialize_args(cli.parse_args(["--max-iters", "2"])),
     )
     state.stopped = True
     state.stop_reason = "test stop"
@@ -176,15 +179,15 @@ def test_stopped_run_requires_force_to_continue(
         state.iteration += 1
         return state
 
-    monkeypatch.setattr(autoresearch, "run_iteration", fake_run_iteration)
-    monkeypatch.setattr(autoresearch, "check_model_consistency", lambda model: [])
+    monkeypatch.setattr(loop, "run_iteration", fake_run_iteration)
+    monkeypatch.setattr(loop, "check_model_consistency", lambda model: [])
 
     # Without --force, resuming a stopped run is an explicit no-op.
-    autoresearch.main(["--resume", str(run_dir)])
+    loop.main(["--resume", str(run_dir)])
     assert iterations == []
 
     # With --force, the stop decision is cleared and iterations continue.
-    autoresearch.main(["--resume", str(run_dir), "--force"])
+    loop.main(["--resume", str(run_dir), "--force"])
     assert iterations == [0, 1]
 
 
@@ -199,13 +202,13 @@ def test_run_lock_rejects_concurrent_process(tmp_path: Path) -> None:
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
         with pytest.raises(RuntimeError, match="locked by another"):
-            autoresearch._acquire_run_lock(run_dir)
+            runstate._acquire_run_lock(run_dir)
     finally:
         os.close(fd)
 
     # Re-entrant acquisition in the same process is a no-op once held.
-    autoresearch._acquire_run_lock(run_dir)
-    autoresearch._acquire_run_lock(run_dir)
+    runstate._acquire_run_lock(run_dir)
+    runstate._acquire_run_lock(run_dir)
 
 
 def test_completed_iteration_phases_are_reused_after_state_recovery(
@@ -213,7 +216,7 @@ def test_completed_iteration_phases_are_reused_after_state_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed = _seed_csv(tmp_path / "seed.csv")
-    run_dir, state, progress = autoresearch.init_run(
+    run_dir, state, progress = prepare.init_run(
         runs_root=tmp_path / "runs",
         run_name="recoverable",
         seed_data=seed,
@@ -248,8 +251,8 @@ def test_completed_iteration_phases_are_reused_after_state_recovery(
         save_json(kwargs["log_path"] / "train_step_meta.json", meta)
         return meta
 
-    monkeypatch.setattr(autoresearch, "_run_dual_evals", fake_dual_evals)
-    monkeypatch.setattr(autoresearch, "run_train_step", fake_train_step)
+    monkeypatch.setattr(prepare, "_run_dual_evals", fake_dual_evals)
+    monkeypatch.setattr(prepare, "run_train_step", fake_train_step)
 
     kwargs = {
         "model": "openai/gpt-oss-20b",
@@ -271,7 +274,7 @@ def test_completed_iteration_phases_are_reused_after_state_recovery(
         "skip_high_eval": True,
         "gen_temperature": 0.0,
     }
-    state = autoresearch.run_iteration(state, progress, **kwargs)
+    state = loop.run_iteration(state, progress, **kwargs)
     assert eval_calls == ["pre", "post"]
     assert train_calls == ["resume"]
 
@@ -280,7 +283,7 @@ def test_completed_iteration_phases_are_reused_after_state_recovery(
     state.iteration = 0
     with (run_dir / "history.jsonl").open("a", encoding="utf-8") as handle:
         handle.write('{"torn":')
-    state = autoresearch.run_iteration(state, progress, **kwargs)
+    state = loop.run_iteration(state, progress, **kwargs)
 
     assert state.iteration == 1
     assert eval_calls == ["pre", "post"]
@@ -296,7 +299,7 @@ def test_pre_eval_carries_forward_previous_post_eval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed = _seed_csv(tmp_path / "seed.csv")
-    run_dir, state, progress = autoresearch.init_run(
+    run_dir, state, progress = prepare.init_run(
         runs_root=tmp_path / "runs",
         run_name="carry",
         seed_data=seed,
@@ -331,8 +334,8 @@ def test_pre_eval_carries_forward_previous_post_eval(
         save_json(kwargs["log_path"] / "train_step_meta.json", meta)
         return meta
 
-    monkeypatch.setattr(autoresearch, "_run_dual_evals", fake_dual_evals)
-    monkeypatch.setattr(autoresearch, "run_train_step", fake_train_step)
+    monkeypatch.setattr(prepare, "_run_dual_evals", fake_dual_evals)
+    monkeypatch.setattr(prepare, "run_train_step", fake_train_step)
 
     kwargs = {
         "model": "openai/gpt-oss-20b",
@@ -354,8 +357,8 @@ def test_pre_eval_carries_forward_previous_post_eval(
         "skip_high_eval": True,
         "gen_temperature": 0.0,
     }
-    state = autoresearch.run_iteration(state, progress, **kwargs)
-    state = autoresearch.run_iteration(state, progress, **kwargs)
+    state = loop.run_iteration(state, progress, **kwargs)
+    state = loop.run_iteration(state, progress, **kwargs)
 
     # Iteration 1's pre eval is carried forward from iteration 0's post eval
     # (same checkpoint, same fixed samples) instead of being re-run.
@@ -395,18 +398,18 @@ def test_pre_eval_does_not_carry_forward_on_checkpoint_mismatch(
     }
     # Same checkpoint → reusable; different/absent checkpoint → not reusable.
     assert (
-        autoresearch._reusable_prev_post(
+        prepare._reusable_prev_post(
             sampler_path="tinker://old/sampler/20", **common
         )
         == prev_post
     )
     assert (
-        autoresearch._reusable_prev_post(
+        prepare._reusable_prev_post(
             sampler_path="tinker://new/sampler/40", **common
         )
         is None
     )
-    assert autoresearch._reusable_prev_post(sampler_path=None, **common) is None
+    assert prepare._reusable_prev_post(sampler_path=None, **common) is None
 
 
 def test_run_train_step_raises_when_no_checkpoint_saved(
@@ -429,10 +432,10 @@ def test_run_train_step_raises_when_no_checkpoint_saved(
 
 
 def test_validate_args_rejects_uncheckpointable_train() -> None:
-    args = autoresearch.parse_args(["--train-max-steps", "5", "--save-every", "20"])
+    args = cli.parse_args(["--train-max-steps", "5", "--save-every", "20"])
     with pytest.raises(ValueError, match="save_every"):
-        autoresearch.validate_args(args)
-    skipped = autoresearch.parse_args(
+        cli.validate_args(args)
+    skipped = cli.parse_args(
         ["--train-max-steps", "5", "--save-every", "20", "--skip-train"]
     )
-    autoresearch.validate_args(skipped)  # checkpointing irrelevant without train
+    cli.validate_args(skipped)  # checkpointing irrelevant without train
