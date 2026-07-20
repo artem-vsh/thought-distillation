@@ -27,19 +27,17 @@ _LOOP_ROOT = Path(__file__).resolve().parent.parent
 if str(_LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(_LOOP_ROOT))
 
-from common import (
-    DEFAULT_MODEL,
+from core.defaults import DEFAULT_MODEL
+from core.io import append_jsonl, ensure_dir
+from mathtask.dataset import (
     MathExample,
-    append_jsonl,
     canonicalize_solution_string,
-    confidence_is_high,
-    ensure_dir,
     load_math_csv,
-    parse_validation_verdict,
     programmatic_solution,
     solutions_match,
     write_math_csv,
 )
+from mathtask.parsing import confidence_is_high, parse_validation_verdict
 from mathtask.tinker_sample import SampleRequest, sample_many_sync
 
 

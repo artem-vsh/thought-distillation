@@ -18,7 +18,7 @@ _LOOP_ROOT = Path(__file__).resolve().parent.parent
 if str(_LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(_LOOP_ROOT))
 
-from common import append_jsonl, load_json, save_json
+from core.io import append_jsonl, load_json, save_json
 from core.loop_config import EvalCIConfig
 from mathtask.sequential_eval import run_sequential_differential
 

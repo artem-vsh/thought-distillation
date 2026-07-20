@@ -15,7 +15,7 @@ from mathtask.ask_arithmetic import (
     load_tinker_api_key,
 )
 
-from common import DEFAULT_MODEL
+from core.defaults import DEFAULT_MODEL
 
 MAX_SAMPLE_RETRIES = 3
 

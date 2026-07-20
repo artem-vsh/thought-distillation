@@ -8,15 +8,9 @@ from pathlib import Path
 import pytest
 
 import autoresearch
-from common import (
-    DifferentialMetrics,
-    EvalMetrics,
-    MathExample,
-    ensure_dir,
-    load_json,
-    save_json,
-    write_math_csv,
-)
+from core.io import ensure_dir, load_json, save_json
+from core.metrics import DifferentialMetrics, EvalMetrics
+from mathtask.dataset import MathExample, write_math_csv
 
 
 def _seed_csv(path: Path) -> Path:
@@ -171,7 +165,7 @@ def test_stopped_run_requires_force_to_continue(
     )
     state.stopped = True
     state.stop_reason = "test stop"
-    from common import save_state
+    from core.runstate import save_state
 
     save_state(run_dir / "state.json", state)
 

@@ -33,20 +33,17 @@ _LOOP_ROOT = Path(__file__).resolve().parent.parent
 if str(_LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(_LOOP_ROOT))
 
-from common import (
+from core.defaults import (
     DEFAULT_MODEL,
     DEFAULT_TRAIN_EVAL_EVERY,
-    DEFAULT_TRAIN_GROUP_SIZE,
     DEFAULT_TRAIN_GROUPS_PER_BATCH,
+    DEFAULT_TRAIN_GROUP_SIZE,
     DEFAULT_TRAIN_LEARNING_RATE,
     DEFAULT_TRAIN_LORA_RANK,
     DEFAULT_TRAIN_MAX_STEPS,
     DEFAULT_TRAIN_SAVE_EVERY,
-    ensure_dir,
-    get_checkpoint_paths,
-    run_python,
-    save_json,
 )
+from core.io import ensure_dir, run_python, save_json
 from mathtask.math_integration import (
     TRAIN_MATH_LLM_JUDGE_SCRIPT,
     load_train_problems,
@@ -316,3 +313,27 @@ def main(argv: list[str] | None = None) -> dict:
 
 if __name__ == "__main__":
     main()
+
+
+def find_latest_train_log(log_root: Path) -> Path | None:
+    """Pick the newest math-llm-judge run directory under log_root."""
+    if not log_root.is_dir():
+        return None
+    candidates = [p for p in log_root.iterdir() if p.is_dir()]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0]
+
+
+def get_checkpoint_paths(log_dir: Path) -> tuple[str | None, str | None]:
+    """Return (state_path, sampler_path) from the last checkpoint in log_dir."""
+    from tinker_cookbook.checkpoint_utils import get_last_checkpoint
+
+    rec = get_last_checkpoint(str(log_dir), required_key="state_path")
+    if rec is None:
+        # Fall back to sampler-only checkpoints.
+        rec = get_last_checkpoint(str(log_dir), required_key="sampler_path")
+    if rec is None:
+        return None, None
+    return rec.state_path, rec.sampler_path

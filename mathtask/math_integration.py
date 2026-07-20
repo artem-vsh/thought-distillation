@@ -13,13 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from common import (
-    MathExample,
-    REPO_ROOT,
-    ensure_dir,
-    run_python,
-    save_json,
-)
+from core.io import REPO_ROOT, ensure_dir, run_python, save_json
+from mathtask.dataset import MathExample
 
 # ---------------------------------------------------------------------------
 # Script paths (this project root)

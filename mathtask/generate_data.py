@@ -25,22 +25,24 @@ _LOOP_ROOT = Path(__file__).resolve().parent.parent
 if str(_LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(_LOOP_ROOT))
 
-from common import (
+from core.defaults import (
     DEFAULT_GEN_TARGET,
     DEFAULT_GEN_TEMPERATURE,
     DEFAULT_MODEL,
+    DEFAULT_SEEDS_PER_BATCH,
     DEFAULT_SEED_DATA,
     DEFAULT_SEED_SAMPLES,
-    DEFAULT_SEEDS_PER_BATCH,
     DEFAULT_VARIATIONS_PER_SEED,
+)
+from mathtask.dataset import (
     MathExample,
     canonical_operation_key,
     format_seed_block,
     load_math_csv,
-    parse_generated_examples,
     sample_examples,
     write_math_csv,
 )
+from mathtask.parsing import parse_generated_examples
 from mathtask.math_integration import make_math_prompt
 from mathtask.tinker_sample import SampleRequest, sample_many_sync
 

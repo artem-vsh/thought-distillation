@@ -35,16 +35,12 @@ _LOOP_ROOT = Path(__file__).resolve().parent.parent
 if str(_LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(_LOOP_ROOT))
 
-from common import (
-    DEFAULT_EVAL_SAMPLE_SIZE,
-    DEFAULT_MODEL,
-    DEFAULT_SEED_DATA,
-    DifferentialMetrics,
-    EvalMetrics,
-    ensure_dir,
+from core.defaults import DEFAULT_EVAL_SAMPLE_SIZE, DEFAULT_MODEL, DEFAULT_SEED_DATA
+from core.io import ensure_dir, save_json
+from core.metrics import DifferentialMetrics, EvalMetrics
+from mathtask.dataset import (
     load_math_csv,
     sample_examples,
-    save_json,
     score_answers_csv,
     write_math_csv,
     write_operations_csv,

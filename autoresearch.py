@@ -43,7 +43,7 @@ _LOOP_ROOT = Path(__file__).resolve().parent
 if str(_LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(_LOOP_ROOT))
 
-from common import (
+from core.defaults import (
     DEFAULT_EVAL_SAMPLE_SIZE,
     DEFAULT_GEN_TARGET,
     DEFAULT_GEN_TEMPERATURE,
@@ -54,37 +54,39 @@ from common import (
     DEFAULT_MODEL,
     DEFAULT_NOISE_Z,
     DEFAULT_RUNS_ROOT,
+    DEFAULT_SEEDS_PER_BATCH,
     DEFAULT_SEED_DATA,
     DEFAULT_SEED_SAMPLES,
-    DEFAULT_SEEDS_PER_BATCH,
     DEFAULT_TRAIN_EVAL_EVERY,
-    DEFAULT_TRAIN_GROUP_SIZE,
     DEFAULT_TRAIN_GROUPS_PER_BATCH,
+    DEFAULT_TRAIN_GROUP_SIZE,
     DEFAULT_TRAIN_LEARNING_RATE,
     DEFAULT_TRAIN_LORA_RANK,
     DEFAULT_TRAIN_MAX_STEPS,
     DEFAULT_TRAIN_SAVE_EVERY,
     DEFAULT_VARIATIONS_PER_SEED,
     MIN_HELDOUT_EVAL_SAMPLE,
-    DifferentialMetrics,
-    LoopState,
+)
+from core.io import (
     append_jsonl,
-    assert_disjoint_train_heldout,
     ensure_dir,
-    filter_out_operations,
     load_json,
+    save_json,
+    utc_now_tag,
+    write_jsonl,
+)
+from core.metrics import DifferentialMetrics
+from core.runstate import LoopState, load_state, save_state
+from core.stopping import marginal_improvement_streak
+from mathtask.dataset import (
+    assert_disjoint_train_heldout,
+    filter_out_operations,
     load_math_csv,
-    load_state,
-    marginal_improvement_streak,
     merge_unique_examples,
     operation_keys,
     sample_examples,
-    save_json,
-    save_state,
     split_train_heldout,
-    utc_now_tag,
     write_math_csv,
-    write_jsonl,
     write_operations_csv,
     write_split_manifest,
 )

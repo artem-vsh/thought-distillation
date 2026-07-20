@@ -7,20 +7,21 @@ from pathlib import Path
 
 import pytest
 
-from common import (
+from core.stopping import is_marginal_improvement, marginal_improvement_streak
+from mathtask.dataset import (
     MathExample,
     canonicalize_solution_string,
-    confidence_is_high,
-    is_marginal_improvement,
-    marginal_improvement_streak,
+    load_math_csv,
     merge_unique_examples,
-    parse_generated_examples,
-    parse_validation_verdict,
     programmatic_solution,
     sample_examples,
     solutions_match,
     write_math_csv,
-    load_math_csv,
+)
+from mathtask.parsing import (
+    confidence_is_high,
+    parse_generated_examples,
+    parse_validation_verdict,
 )
 
 
@@ -151,7 +152,7 @@ def test_is_marginal_improvement_across_iters() -> None:
 
 
 def test_score_answers_csv_inprocess(tmp_path: Path) -> None:
-    from common import score_answers_csv
+    from mathtask.dataset import score_answers_csv
 
     answers = tmp_path / "answers.csv"
     scored = tmp_path / "scored.csv"
@@ -168,7 +169,7 @@ def test_score_answers_csv_inprocess(tmp_path: Path) -> None:
 
 
 def test_save_json_rejects_nan_without_overwriting(tmp_path: Path) -> None:
-    from common import load_json, save_json
+    from core.io import load_json, save_json
 
     path = tmp_path / "strict.json"
     save_json(path, {"status": "good"})
@@ -178,7 +179,7 @@ def test_save_json_rejects_nan_without_overwriting(tmp_path: Path) -> None:
 
 
 def test_default_seed_points_at_loop_data() -> None:
-    from common import DEFAULT_SEED_DATA
+    from core.defaults import DEFAULT_SEED_DATA
     from mathtask.math_integration import LOOP_SEED_DATA, default_seed_data
 
     assert DEFAULT_SEED_DATA.is_file()
@@ -231,7 +232,7 @@ def test_progress_checkpoint_index_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_split_train_heldout_disjoint() -> None:
-    from common import (
+    from mathtask.dataset import (
         assert_disjoint_train_heldout,
         filter_out_operations,
         operation_keys,
@@ -254,7 +255,7 @@ def test_split_train_heldout_disjoint() -> None:
 
 
 def test_canonical_operation_key() -> None:
-    from common import canonical_operation_key
+    from mathtask.dataset import canonical_operation_key
 
     equivalent = [
         ("12+34", "34+12"),  # commuted addition
@@ -279,7 +280,7 @@ def test_canonical_operation_key() -> None:
 
 
 def test_heldout_guard_catches_canonical_leaks() -> None:
-    from common import (
+    from mathtask.dataset import (
         assert_disjoint_train_heldout,
         filter_out_operations,
         merge_unique_examples,
